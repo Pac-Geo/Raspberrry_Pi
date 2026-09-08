@@ -54,3 +54,26 @@ restart the frame.
 
 Install once with ./install_photo_frame.sh. After that, no command is needed
 to exit: just press F12.
+
+
+V3.3 PIR / POWER MANAGEMENT
+---------------------------
+PIR wiring:
+  VCC -> 5V (physical pin 2 or 4)
+  GND -> Ground (physical pin 6 is convenient)
+  OUT -> physical pin 11 = BCM GPIO17 = WiringPi/Pi4J GPIO0
+
+Behavior:
+  - PIR motion resets the inactivity timer.
+  - After 1800 seconds (30 minutes) of no motion, the display is powered off.
+  - PIR motion wakes the display automatically.
+  - The Pi itself remains running while the display sleeps.
+  - Drive sync, USB monitoring, logging, watchdog and F12 emergency exit remain active.
+  - Video logic is unchanged in this release.
+
+Config keys:
+  pir_enabled
+  pir_bcm_pin
+  pir_poll_seconds
+  inactivity_timeout_seconds
+  display_sleep_enabled

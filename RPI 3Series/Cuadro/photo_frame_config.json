@@ -13,5 +13,10 @@
   "download_retries": 3,
   "http_timeout_seconds": 30,
   "log_file": "/home/pacgeo/photo_frame/logs/photo_frame.log",
-  "log_max_bytes": 5242880
+  "log_max_bytes": 5242880,
+  "pir_enabled": true,
+  "pir_bcm_pin": 17,
+  "pir_poll_seconds": 0.1,
+  "inactivity_timeout_seconds": 1800,
+  "display_sleep_enabled": true
 }

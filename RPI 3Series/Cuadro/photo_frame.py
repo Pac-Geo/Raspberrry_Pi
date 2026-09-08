@@ -60,6 +60,11 @@ import subprocess
 import threading
 from PIL import Image, ImageFilter, ImageOps
 
+try:
+    from gpiozero import MotionSensor
+except ImportError:
+    MotionSensor = None
+
 # =====================================================================
 # CONFIGURATION
 # =====================================================================
@@ -753,6 +758,64 @@ def draw_message(screen, lines):
     pygame.display.flip()
 
 
+def _run_quiet(command):
+    try:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def set_display_power(on):
+    state = "ON" if on else "OFF"
+    commands = (
+        [
+            ["wlopm", "--on", "*"],
+            ["xset", "dpms", "force", "on"],
+            ["vcgencmd", "display_power", "1"],
+        ]
+        if on
+        else [
+            ["wlopm", "--off", "*"],
+            ["xset", "dpms", "force", "off"],
+            ["vcgencmd", "display_power", "0"],
+        ]
+    )
+
+    for command in commands:
+        if _run_quiet(command):
+            print(f"Display power {state}: {' '.join(command)}")
+            return True
+
+    print(f"WARNING: Could not switch display power {state}.")
+    return False
+
+
+def setup_pir():
+    if not bool(CONFIG.get("pir_enabled", True)):
+        print("PIR disabled in configuration.")
+        return None
+
+    if MotionSensor is None:
+        print("WARNING: gpiozero is not installed; PIR disabled.")
+        print("Install with: sudo apt install -y python3-gpiozero")
+        return None
+
+    pin = int(CONFIG.get("pir_bcm_pin", 17))
+    try:
+        pir = MotionSensor(pin, pull_up=False)
+        print(f"PIR ready: BCM GPIO{pin} (physical pin 11 when pin=17)")
+        return pir
+    except Exception as exc:
+        print(f"WARNING: PIR initialization failed on BCM GPIO{pin}: {exc}")
+        return None
+
+
 def main():
     print('\n========================')
     print('RASPBERRY PI PHOTO FRAME')
@@ -788,8 +851,69 @@ def main():
     usb_connected = connected
     last_usb_check = 0.0
 
+    # PIR / display power management
+    pir = setup_pir()
+    inactivity_timeout = float(CONFIG.get("inactivity_timeout_seconds", 1800))
+    pir_poll_seconds = float(CONFIG.get("pir_poll_seconds", 0.10))
+    display_awake = True
+    last_person_activity = time.monotonic()
+    last_pir_state = False
+    print(f"Inactivity timeout: {inactivity_timeout:.0f} seconds")
+
     while running:
         now = time.monotonic()
+
+        # PIR motion/person detection and display power state.
+        pir_active = False
+        if pir is not None:
+            try:
+                pir_active = bool(pir.motion_detected)
+            except Exception as exc:
+                print(f"PIR read error: {exc}")
+
+        if pir_active:
+            last_person_activity = now
+
+            if not last_pir_state:
+                print("PIR: person/motion detected")
+
+            if not display_awake:
+                print("PIR wake: turning display ON")
+                set_display_power(True)
+                display_awake = True
+                try:
+                    screen = pygame.display.set_mode(
+                        (screen_w, screen_h),
+                        pygame.FULLSCREEN | pygame.DOUBLEBUF
+                    )
+                    pygame.mouse.set_visible(False)
+                    if current_surface is not None:
+                        screen.blit(current_surface, (0, 0))
+                        pygame.display.flip()
+                except Exception as exc:
+                    print(f"Wake redraw failed: {exc}")
+
+        last_pir_state = pir_active
+
+        if (
+            bool(CONFIG.get("display_sleep_enabled", True))
+            and display_awake
+            and inactivity_timeout > 0
+            and (now - last_person_activity) >= inactivity_timeout
+        ):
+            print(f"Inactivity timeout reached ({inactivity_timeout:.0f}s): display OFF")
+            set_display_power(False)
+            display_awake = False
+
+        # Keep services alive while display is asleep; do not advance slideshow.
+        if not display_awake:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+                elif event.type == pygame.KEYDOWN and event.key in (pygame.K_q, pygame.K_ESCAPE):
+                    running = False
+            time.sleep(max(0.05, pir_poll_seconds))
+            continue
         force_reload = False
 
         for event in pygame.event.get():
