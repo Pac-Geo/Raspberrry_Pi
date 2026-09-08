@@ -24,5 +24,6 @@
   "pir_low_stable_seconds": 3.0,
   "pir_startup_ignore_seconds": 30,
   "pir_high_confirm_seconds": 0.75,
-  "pir_sleep_rearm_low_seconds": 5.0
+  "pir_sleep_rearm_low_seconds": 5.0,
+  "display_rotation_degrees": 270
 }

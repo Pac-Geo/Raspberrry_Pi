@@ -261,3 +261,24 @@ V4.5 PIR SLEEP / WAKE FILTER FIX
   can occur when fullscreen/display state changes.
 - Keyboard keypress or mouse click can still wake as a manual fallback.
 - Test timeout remains 45 seconds.
+
+
+V4.6 PORTRAIT ORIENTATION
+-------------------------
+The slideshow is now configured for portrait mounting.
+
+Setting:
+  "display_rotation_degrees": 270
+
+This means the slideshow content is rotated 90 degrees counterclockwise
+relative to the original landscape orientation.
+
+The physical monitor resolution is left unchanged.  The photo-frame program
+creates a portrait logical canvas, renders photos into that canvas, and rotates
+the final frame onto the display.
+
+To change orientation later:
+  0   = normal landscape
+  90  = 90 degrees clockwise
+  180 = upside down
+  270 = 90 degrees counterclockwise

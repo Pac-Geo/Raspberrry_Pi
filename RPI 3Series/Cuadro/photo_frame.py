@@ -799,6 +799,26 @@ def setup_pir():
         return None
 
 
+
+def present_frame(screen, frame_surface, physical_w, physical_h, rotation):
+    """Rotate the logical slideshow surface to match the physical display."""
+    if rotation == 90:
+        output = pygame.transform.rotate(frame_surface, -90)
+    elif rotation == 180:
+        output = pygame.transform.rotate(frame_surface, 180)
+    elif rotation == 270:
+        # pygame positive rotation is counterclockwise.
+        output = pygame.transform.rotate(frame_surface, 90)
+    else:
+        output = frame_surface
+
+    if output.get_size() != (physical_w, physical_h):
+        output = pygame.transform.smoothscale(output, (physical_w, physical_h))
+
+    screen.blit(output, (0, 0))
+    pygame.display.flip()
+
+
 def main():
     print('\n========================')
     print('RASPBERRY PI PHOTO FRAME')
@@ -816,11 +836,29 @@ def main():
     pygame.init()
     pygame.mouse.set_visible(False)
     info = pygame.display.Info()
-    screen_w, screen_h = info.current_w, info.current_h
-    print(f'Detected display: {screen_w}x{screen_h}')
+    physical_w, physical_h = info.current_w, info.current_h
+    rotation = int(CONFIG.get("display_rotation_degrees", 270)) % 360
 
-    screen = pygame.display.set_mode((screen_w, screen_h), pygame.FULLSCREEN | pygame.DOUBLEBUF)
+    if rotation in (90, 270):
+        screen_w, screen_h = physical_h, physical_w
+    else:
+        screen_w, screen_h = physical_w, physical_h
+
+    print(
+        f'Detected display: {physical_w}x{physical_h} | '
+        f'logical frame: {screen_w}x{screen_h} | '
+        f'rotation={rotation} degrees'
+    )
+
+    screen = pygame.display.set_mode(
+        (physical_w, physical_h),
+        pygame.FULLSCREEN | pygame.DOUBLEBUF
+    )
     pygame.display.set_caption('Raspberry Pi Photo Frame')
+
+    # All slideshow rendering happens on this logical canvas.  The canvas is
+    # rotated 90 degrees counterclockwise onto the physical display at present time.
+    frame_canvas = pygame.Surface((screen_w, screen_h))
 
     photos = find_photos()
     seen_sync_generation = sync_completed_generation
@@ -888,10 +926,12 @@ def main():
                 display_awake = True
                 try:
                     if current_surface is not None:
-                        screen.blit(current_surface, (0, 0))
+                        frame_canvas.blit(current_surface, (0, 0))
                     else:
-                        screen.fill((0, 0, 0))
-                    pygame.display.flip()
+                        frame_canvas.fill((0, 0, 0))
+                    present_frame(
+                        screen, frame_canvas, physical_w, physical_h, rotation
+                    )
                 except Exception as exc:
                     print(f"Wake redraw failed: {exc}")
 
@@ -918,8 +958,10 @@ def main():
             # Guaranteed application-level blanking first. Even if the desktop's
             # display-power command is unavailable, the user sees a black screen.
             try:
-                screen.fill((0, 0, 0))
-                pygame.display.flip()
+                frame_canvas.fill((0, 0, 0))
+                present_frame(
+                    screen, frame_canvas, physical_w, physical_h, rotation
+                )
             except Exception as exc:
                 print(f"Black-screen blanking failed: {exc}")
 
@@ -948,10 +990,12 @@ def main():
                 last_person_activity = time.monotonic()
                 try:
                     if current_surface is not None:
-                        screen.blit(current_surface, (0, 0))
+                        frame_canvas.blit(current_surface, (0, 0))
                     else:
-                        screen.fill((0, 0, 0))
-                    pygame.display.flip()
+                        frame_canvas.fill((0, 0, 0))
+                    present_frame(
+                        screen, frame_canvas, physical_w, physical_h, rotation
+                    )
                 except Exception as exc:
                     print(f"Wake redraw failed: {exc}")
 
@@ -1137,8 +1181,10 @@ def main():
                 draw_message(screen, ['No readable media found.', 'Press S to sync or R to rescan.'])
 
         if current_surface is not None:
-            screen.blit(current_surface, (0, 0))
-            pygame.display.flip()
+            frame_canvas.blit(current_surface, (0, 0))
+            present_frame(
+                screen, frame_canvas, physical_w, physical_h, rotation
+            )
 
         clock.tick(30)
 
