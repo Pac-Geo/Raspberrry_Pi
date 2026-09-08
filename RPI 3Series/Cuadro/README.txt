@@ -282,3 +282,47 @@ To change orientation later:
   90  = 90 degrees clockwise
   180 = upside down
   270 = 90 degrees counterclockwise
+
+
+V4.7 FIT RESIZE
+---------------
+Photo foreground scaling now uses true FIT behavior.
+
+- Small photos are enlarged until one dimension reaches the available frame.
+- Large photos are reduced until the entire image fits.
+- Aspect ratio is always preserved.
+- The foreground photo is NEVER cropped.
+- It does NOT use "fill" behavior.
+- The existing blurred background remains behind photos whose aspect ratio does
+  not match the portrait display.
+
+Example:
+  A small 600x400 image can now be enlarged to fit the portrait frame.
+  A very large image is reduced to fit the same frame.
+  In both cases the complete original photo remains visible.
+
+
+V4.8 HIGH-QUALITY FIT
+---------------------
+The photo FIT behavior is unchanged, but small images are no longer enlarged
+without limit.
+
+New setting:
+  "max_photo_upscale_factor": 2.0
+
+Meaning:
+  - Large photos are still reduced to fit the display.
+  - Small photos may be enlarged, but by no more than 2x by default.
+  - Aspect ratio remains preserved.
+  - No foreground cropping.
+  - A mild high-quality sharpening pass is applied only after enlargement.
+
+Why:
+  A very small source photo simply does not contain enough detail to look sharp
+  when expanded to a 2K portrait display. Limiting the enlargement prevents the
+  program from making that loss of quality much more obvious.
+
+If desired, this value can later be changed:
+  1.5 = more conservative / sharper small photos
+  2.0 = current balance
+  3.0 = fills more space but exposes more source-image softness

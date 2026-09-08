@@ -738,8 +738,34 @@ def make_frame(path, screen_w, screen_h):
         black = Image.new('RGB', background.size, (0, 0, 0))
         background = Image.blend(background, black, 0.18)
 
-        foreground = image.copy()
-        foreground.thumbnail((screen_w, screen_h), Image.Resampling.LANCZOS)
+        # TRUE FIT: preserve the entire image and preserve aspect ratio.
+        #
+        # Small source images can look soft if enlarged too aggressively.
+        # Limit enlargement to a configurable maximum, then apply a very mild
+        # sharpening pass only when an image was actually enlarged.
+        fit_scale = min(screen_w / image.width, screen_h / image.height)
+        max_upscale = float(CONFIG.get("max_photo_upscale_factor", 2.0))
+
+        if fit_scale > 1.0:
+            final_scale = min(fit_scale, max_upscale)
+        else:
+            final_scale = fit_scale
+
+        foreground_w = max(1, round(image.width * final_scale))
+        foreground_h = max(1, round(image.height * final_scale))
+
+        foreground = image.resize(
+            (foreground_w, foreground_h),
+            Image.Resampling.LANCZOS,
+        )
+
+        # Recover a little edge definition after enlargement without creating
+        # the harsh halos that strong sharpening can cause.
+        if final_scale > 1.0:
+            foreground = foreground.filter(
+                ImageFilter.UnsharpMask(radius=1.0, percent=110, threshold=3)
+            )
+
         x = (screen_w - foreground.width) // 2
         y = (screen_h - foreground.height) // 2
         background.paste(foreground, (x, y))

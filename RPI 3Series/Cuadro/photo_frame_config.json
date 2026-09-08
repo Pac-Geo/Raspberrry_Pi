@@ -25,5 +25,7 @@
   "pir_startup_ignore_seconds": 30,
   "pir_high_confirm_seconds": 0.75,
   "pir_sleep_rearm_low_seconds": 5.0,
-  "display_rotation_degrees": 270
+  "display_rotation_degrees": 270,
+  "photo_scaling_mode": "fit",
+  "max_photo_upscale_factor": 2.0
 }
