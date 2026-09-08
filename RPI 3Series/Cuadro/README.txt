@@ -77,3 +77,22 @@ Config keys:
   pir_poll_seconds
   inactivity_timeout_seconds
   display_sleep_enabled
+
+
+V3.4 PIR SLEEP FIX
+------------------
+Testing timeout is 45 seconds.
+Final desired timeout is 45 minutes = 2700 seconds.
+
+Important behavior change:
+  - The inactivity timer resets only on a new PIR LOW->HIGH motion event.
+  - A PIR that holds its OUT pin HIGH no longer resets the timer continuously.
+  - At timeout, pygame is first forced to a black screen.
+  - The program then also attempts hardware display power-off.
+  - A NEW PIR LOW->HIGH event wakes the display and redraws the slideshow.
+  - Terminal/log diagnostics print PIR HIGH/LOW state and inactivity time every 5 seconds.
+
+When testing is complete, change:
+  "inactivity_timeout_seconds": 45
+To:
+  "inactivity_timeout_seconds": 2700

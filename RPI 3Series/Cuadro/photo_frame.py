@@ -773,6 +773,8 @@ def _run_quiet(command):
 
 def set_display_power(on):
     state = "ON" if on else "OFF"
+
+    # Raspberry Pi OS may run Wayland or X11. Try the common mechanisms.
     commands = (
         [
             ["wlopm", "--on", "*"],
@@ -792,7 +794,9 @@ def set_display_power(on):
             print(f"Display power {state}: {' '.join(command)}")
             return True
 
-    print(f"WARNING: Could not switch display power {state}.")
+    # The slideshow has already been blacked out before OFF, so failure here
+    # does not prevent visual sleep; it only means the HDMI output stayed active.
+    print(f"Display hardware power command unavailable for {state}; using black-screen sleep.")
     return False
 
 
@@ -853,17 +857,22 @@ def main():
 
     # PIR / display power management
     pir = setup_pir()
-    inactivity_timeout = float(CONFIG.get("inactivity_timeout_seconds", 1800))
+    inactivity_timeout = float(CONFIG.get("inactivity_timeout_seconds", 45))
     pir_poll_seconds = float(CONFIG.get("pir_poll_seconds", 0.10))
+    pir_debug_seconds = float(CONFIG.get("pir_debug_seconds", 5.0))
     display_awake = True
     last_person_activity = time.monotonic()
     last_pir_state = False
+    last_pir_debug = 0.0
     print(f"Inactivity timeout: {inactivity_timeout:.0f} seconds")
+    print("PIR timer uses MOTION EVENTS (LOW->HIGH), not continuous HIGH level.")
 
     while running:
         now = time.monotonic()
 
-        # PIR motion/person detection and display power state.
+        # PIR motion/person detection. A new motion event is a LOW->HIGH edge.
+        # This matters because many PIR modules hold OUT high for many seconds;
+        # a held-high output must not continuously reset the inactivity timer.
         pir_active = False
         if pir is not None:
             try:
@@ -871,11 +880,11 @@ def main():
             except Exception as exc:
                 print(f"PIR read error: {exc}")
 
-        if pir_active:
-            last_person_activity = now
+        motion_event = pir_active and not last_pir_state
 
-            if not last_pir_state:
-                print("PIR: person/motion detected")
+        if motion_event:
+            last_person_activity = now
+            print("PIR EVENT: motion detected (LOW -> HIGH)")
 
             if not display_awake:
                 print("PIR wake: turning display ON")
@@ -889,11 +898,23 @@ def main():
                     pygame.mouse.set_visible(False)
                     if current_surface is not None:
                         screen.blit(current_surface, (0, 0))
-                        pygame.display.flip()
+                    else:
+                        screen.fill((0, 0, 0))
+                    pygame.display.flip()
                 except Exception as exc:
                     print(f"Wake redraw failed: {exc}")
 
         last_pir_state = pir_active
+
+        # Periodic diagnostics so we can see exactly what the PIR/timer is doing.
+        if now - last_pir_debug >= pir_debug_seconds:
+            last_pir_debug = now
+            inactive_for = now - last_person_activity
+            print(
+                f"PIR state={'HIGH' if pir_active else 'LOW'} | "
+                f"inactive={inactive_for:.1f}/{inactivity_timeout:.0f}s | "
+                f"display={'ON' if display_awake else 'OFF'}"
+            )
 
         if (
             bool(CONFIG.get("display_sleep_enabled", True))
@@ -901,11 +922,22 @@ def main():
             and inactivity_timeout > 0
             and (now - last_person_activity) >= inactivity_timeout
         ):
-            print(f"Inactivity timeout reached ({inactivity_timeout:.0f}s): display OFF")
+            print(f"Inactivity timeout reached ({inactivity_timeout:.0f}s): blanking display")
+
+            # Guaranteed application-level blanking first. Even if the desktop's
+            # display-power command is unavailable, the user sees a black screen.
+            try:
+                screen.fill((0, 0, 0))
+                pygame.display.flip()
+            except Exception as exc:
+                print(f"Black-screen blanking failed: {exc}")
+
+            # Then request actual HDMI/monitor power-down when supported.
             set_display_power(False)
             display_awake = False
 
         # Keep services alive while display is asleep; do not advance slideshow.
+        # Wake only on a NEW PIR LOW->HIGH event.
         if not display_awake:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
