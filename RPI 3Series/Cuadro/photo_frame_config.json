@@ -1,0 +1,17 @@
+{
+  "usb_label": "CUADRO",
+  "usb_media_base": "/media/pacgeo",
+  "photo_folder": "PHOTOS",
+  "slide_seconds": 10,
+  "sync_interval_seconds": 900,
+  "usb_recheck_seconds": 2,
+  "media_ordering": "folder_then_name",
+  "apps_script_url": "https://script.google.com/macros/s/AKfycbzke5eN-5VNLriVYGjG8mH4-dEWb1km7iGoxhgm262S62JwzOVulGjC9ajhb3DQ8ZdRJA/exec",
+  "apps_script_token": "facildeconectar",
+  "download_chunk_size": 1048576,
+  "max_photo_size_mb": 100,
+  "download_retries": 3,
+  "http_timeout_seconds": 30,
+  "log_file": "/home/pacgeo/photo_frame/logs/photo_frame.log",
+  "log_max_bytes": 5242880
+}

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Stop Photo Frame
+Comment=Emergency stop for slideshow and video playback
+Exec=/home/pacgeo/photo_frame/stop_photo_frame.sh
+Terminal=false
+Icon=process-stop
+Categories=Utility;
+StartupNotify=false

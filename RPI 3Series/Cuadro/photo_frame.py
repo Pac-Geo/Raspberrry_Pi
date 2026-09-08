@@ -7,6 +7,7 @@
 # Versions:
 #   v1.0 - Initial Raspberry Pi full-screen photo viewer
 #   v2.0 - USB hard-drive storage + Google Drive Apps Script sync
+#   v3.0 - Config file, folder ordering, logging, USB reconnect, autostart support
 # -----------------------------------------------------------
 # Setup:
 #   Raspberry Pi 3 Model B+
@@ -46,6 +47,7 @@
 
 import base64
 import hashlib
+import json
 import os
 import re
 import sys
@@ -56,57 +58,202 @@ import pygame
 import requests
 import subprocess
 import threading
-import subprocess
 from PIL import Image, ImageFilter, ImageOps
 
-USB_LABEL = 'CUADRO'
-USB_MEDIA_BASE = Path('/media/pacgeo')
+# =====================================================================
+# CONFIGURATION
+# =====================================================================
 
-def resolve_usb_root() -> Path:
-    '''
-    Raspberry Pi OS may mount the same drive as CUADRO, CUADRO1,
-    CUADRO2, etc. Find the currently accessible CUADRO* directory
-    automatically instead of hard-coding one mount path.
-    '''
-    candidates = []
+CONFIG_PATH = Path(__file__).with_name('photo_frame_config.json')
 
-    exact = USB_MEDIA_BASE / USB_LABEL
-    if exact.exists() and exact.is_dir():
-        candidates.append(exact)
+DEFAULT_CONFIG = {
+    'usb_label': 'CUADRO',
+    'usb_media_base': '/media/pacgeo',
+    'photo_folder': 'PHOTOS',
+    'slide_seconds': 10,
+    'sync_interval_seconds': 900,
+    'usb_recheck_seconds': 2,
+    'media_ordering': 'folder_then_name',
+    'apps_script_url': (
+        'https://script.google.com/macros/s/'
+        'AKfycbzke5eN-5VNLriVYGjG8mH4-dEWb1km7iGoxhgm262S62JwzOVulGjC9ajhb3DQ8ZdRJA/'
+        'exec'
+    ),
+    'apps_script_token': 'facildeconectar',
+    'download_chunk_size': 1024 * 1024,
+    'max_photo_size_mb': 100,
+    'download_retries': 3,
+    'http_timeout_seconds': 30,
+    'log_file': '/home/pacgeo/photo_frame/logs/photo_frame.log',
+    'log_max_bytes': 5 * 1024 * 1024,
+}
+
+
+def load_config():
+    config = DEFAULT_CONFIG.copy()
+
+    if CONFIG_PATH.exists():
+        try:
+            with CONFIG_PATH.open('r', encoding='utf-8') as handle:
+                user_config = json.load(handle)
+            config.update(user_config)
+        except Exception as exc:
+            print(f'WARNING: could not read {CONFIG_PATH}: {exc}')
+            print('Using built-in defaults.')
+    else:
+        print(f'WARNING: config file not found: {CONFIG_PATH}')
+        print('Using built-in defaults.')
+
+    return config
+
+
+CONFIG = load_config()
+
+USB_LABEL = str(CONFIG['usb_label'])
+USB_MEDIA_BASE = Path(CONFIG['usb_media_base'])
+PHOTO_FOLDER_NAME = str(CONFIG['photo_folder'])
+
+APPS_SCRIPT_URL = str(CONFIG['apps_script_url'])
+APPS_SCRIPT_TOKEN = str(CONFIG['apps_script_token'])
+
+SLIDE_SECONDS = float(CONFIG['slide_seconds'])
+SYNC_INTERVAL_SECONDS = float(CONFIG['sync_interval_seconds'])
+USB_RECHECK_SECONDS = float(CONFIG['usb_recheck_seconds'])
+MEDIA_ORDERING = str(CONFIG['media_ordering'])
+DOWNLOAD_CHUNK_SIZE = int(CONFIG['download_chunk_size'])
+MAX_PHOTO_SIZE = int(CONFIG['max_photo_size_mb']) * 1024 * 1024
+DOWNLOAD_RETRIES = int(CONFIG['download_retries'])
+HTTP_TIMEOUT_SECONDS = float(CONFIG['http_timeout_seconds'])
+LOG_FILE = Path(CONFIG['log_file']).expanduser()
+LOG_MAX_BYTES = int(CONFIG['log_max_bytes'])
+
+
+class TeeStream:
+    """Mirror stdout/stderr to the terminal and a persistent log file."""
+
+    _lock = threading.Lock()
+
+    def __init__(self, terminal, logfile):
+        self.terminal = terminal
+        self.logfile = logfile
+        self.at_line_start = True
+
+    def write(self, data):
+        if not data:
+            return 0
+
+        with self._lock:
+            self.terminal.write(data)
+            self.terminal.flush()
+
+            for piece in data.splitlines(keepends=True):
+                if self.at_line_start and piece.strip():
+                    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+                    self.logfile.write(f'[{timestamp}] ')
+
+                self.logfile.write(piece)
+                self.at_line_start = piece.endswith('\n')
+
+            self.logfile.flush()
+
+        return len(data)
+
+    def flush(self):
+        self.terminal.flush()
+        self.logfile.flush()
+
+    def isatty(self):
+        return self.terminal.isatty()
+
+
+def setup_file_logging():
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+        if LOG_FILE.exists() and LOG_FILE.stat().st_size >= LOG_MAX_BYTES:
+            backup = LOG_FILE.with_suffix(LOG_FILE.suffix + '.1')
+            backup.unlink(missing_ok=True)
+            LOG_FILE.replace(backup)
+
+        handle = LOG_FILE.open('a', encoding='utf-8', buffering=1)
+        sys.stdout = TeeStream(sys.__stdout__, handle)
+        sys.stderr = TeeStream(sys.__stderr__, handle)
+        print(f'Logging to: {LOG_FILE}')
+        return handle
+    except Exception as exc:
+        print(f'WARNING: file logging unavailable: {exc}')
+        return None
+
+
+LOG_HANDLE = setup_file_logging()
+
+
+# =====================================================================
+# USB DRIVE RESOLUTION / RECONNECTION
+# =====================================================================
+
+USB_ROOT = None
+PHOTO_DIR = None
+VIDEO_CACHE_DIR = None
+
+
+def resolve_usb_root():
+    """Return the real mounted CUADRO filesystem, or None when disconnected."""
+    try:
+        result = subprocess.run(
+            ['findmnt', '-rn', '-S', f'LABEL={USB_LABEL}', '-o', 'TARGET'],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            target = Path(result.stdout.strip().splitlines()[0])
+            if target.exists() and target.is_dir():
+                return target
+    except Exception:
+        pass
 
     try:
-        for p in sorted(USB_MEDIA_BASE.glob(f'{USB_LABEL}*')):
-            if p.is_dir() and p not in candidates:
-                candidates.append(p)
+        candidates = sorted(
+            p for p in USB_MEDIA_BASE.glob(f'{USB_LABEL}*')
+            if p.is_dir()
+        )
     except OSError:
-        pass
+        candidates = []
 
     for candidate in candidates:
         try:
-            next(candidate.iterdir(), None)
-            return candidate
+            if os.path.ismount(candidate):
+                return candidate
         except OSError:
-            continue
+            pass
 
-    return exact
+    return None
 
-USB_ROOT = resolve_usb_root()
-PHOTO_DIR = USB_ROOT / 'PHOTOS'
-VIDEO_CACHE_DIR = USB_ROOT / '.photo_frame_cache' / 'videos'
 
-APPS_SCRIPT_URL = (
-    'https://script.google.com/macros/s/'
-    'AKfycbzke5eN-5VNLriVYGjG8mH4-dEWb1km7iGoxhgm262S62JwzOVulGjC9ajhb3DQ8ZdRJA/'
-    'exec'
-)
-APPS_SCRIPT_TOKEN = 'facildeconectar'
+def refresh_usb_paths():
+    """Refresh global USB paths and report whether the drive is connected."""
+    global USB_ROOT, PHOTO_DIR, VIDEO_CACHE_DIR
 
-SLIDE_SECONDS = 10
-SYNC_INTERVAL_SECONDS = 15 * 60
-DOWNLOAD_CHUNK_SIZE = 16 * 1024
-MAX_PHOTO_SIZE = 100 * 1024 * 1024
-DOWNLOAD_RETRIES = 3
-HTTP_TIMEOUT_SECONDS = 20
+    new_root = resolve_usb_root()
+
+    if new_root is None:
+        USB_ROOT = None
+        PHOTO_DIR = None
+        VIDEO_CACHE_DIR = None
+        return False
+
+    if new_root != USB_ROOT:
+        USB_ROOT = new_root
+        PHOTO_DIR = USB_ROOT / PHOTO_FOLDER_NAME
+        VIDEO_CACHE_DIR = USB_ROOT / '.photo_frame_cache' / 'videos'
+        print(f'USB mounted: {USB_ROOT}')
+        print(f'Media directory: {PHOTO_DIR}')
+
+    return True
+
+
+refresh_usb_paths()
 
 
 # Background Drive sync state
@@ -123,24 +270,24 @@ DRIVE_MIME_TYPES = {
     'video/mp4', 'video/quicktime', 'video/x-msvideo',
     'video/x-matroska', 'video/mpeg', 'video/webm'
 }
+
 session = requests.Session()
 
 
 def usb_is_mounted():
-    """Return True when the CUADRO path is present and readable."""
+    if not refresh_usb_paths():
+        return False
+
     try:
-        if not USB_ROOT.exists() or not USB_ROOT.is_dir():
-            return False
-        next(USB_ROOT.iterdir(), None)
-        return True
-    except (OSError, PermissionError):
+        return USB_ROOT is not None and USB_ROOT.exists() and USB_ROOT.is_dir()
+    except OSError:
         return False
 
 
 def ensure_photo_directory():
     if not usb_is_mounted():
-        print(f'USB drive path is not accessible at: {USB_ROOT}')
         return False
+
     try:
         PHOTO_DIR.mkdir(parents=True, exist_ok=True)
         return True
@@ -154,20 +301,42 @@ def sanitize_filename(name):
     return cleaned or 'UNNAMED.JPG'
 
 
+def media_sort_key(path):
+    """Folder-based ordering: folder path first, then filename."""
+    try:
+        relative = path.relative_to(PHOTO_DIR)
+    except Exception:
+        relative = path
+
+    parts = tuple(part.casefold() for part in relative.parts)
+
+    if MEDIA_ORDERING == 'folder_then_name':
+        return parts
+
+    if MEDIA_ORDERING == 'name_only':
+        return (path.name.casefold(),)
+
+    return parts
+
+
 def find_photos():
+    """Recursively scan PHOTOS so family folders define slideshow ordering."""
     if not ensure_photo_directory():
         return []
+
     try:
-        photos = [
-            p for p in PHOTO_DIR.iterdir()
+        media = [
+            p for p in PHOTO_DIR.rglob('*')
             if p.is_file()
             and p.suffix.lower() in SUPPORTED_EXTENSIONS
             and p.name != 'DOWNLOAD.TMP'
+            and '.photo_frame_cache' not in p.parts
         ]
     except OSError as exc:
-        print(f'Could not scan photo folder: {exc}')
+        print(f'Could not scan media folder: {exc}')
         return []
-    return sorted(photos, key=lambda p: p.name.lower())
+
+    return sorted(media, key=media_sort_key)
 
 
 def file_matches_size(path, expected_size):
@@ -294,6 +463,10 @@ def download_photo(photo):
 
 
 def sync_drive_to_usb():
+    if not ensure_photo_directory():
+        print('Drive sync skipped: CUADRO is disconnected.')
+        return False
+
     print('\n========================')
     print('GOOGLE DRIVE -> USB SYNC')
     print('========================')
@@ -584,13 +757,15 @@ def main():
     print('\n========================')
     print('RASPBERRY PI PHOTO FRAME')
     print('========================')
-    print(f'USB drive: {USB_ROOT}')
-    print(f'Photo directory: {PHOTO_DIR}')
-    print('CUADRO USB drive mounted.' if usb_is_mounted() else 'WARNING: CUADRO USB drive is NOT mounted.')
+    connected = refresh_usb_paths()
+    print(f'USB drive: {USB_ROOT if USB_ROOT else "DISCONNECTED"}')
+    print(f'Photo directory: {PHOTO_DIR if PHOTO_DIR else "waiting for USB"}')
 
-    # Start sync in the background so any media already on the USB drive
-    # can begin displaying immediately.
-    start_background_sync()
+    if connected:
+        print('CUADRO USB drive mounted.')
+        start_background_sync()
+    else:
+        print('CUADRO USB drive is disconnected. Slideshow will wait and reconnect automatically.')
 
     pygame.init()
     pygame.mouse.set_visible(False)
@@ -610,6 +785,8 @@ def main():
     last_sync = time.monotonic()
     clock = pygame.time.Clock()
     running = True
+    usb_connected = connected
+    last_usb_check = 0.0
 
     while running:
         now = time.monotonic()
@@ -628,7 +805,8 @@ def main():
                     index = (index - 1) % len(photos)
                     force_reload = True
                 elif event.key == pygame.K_r:
-                    print('Rescanning USB photo directory...')
+                    print('Rescanning USB media directory...')
+                    refresh_usb_paths()
                     photos = find_photos()
                     index = 0
                     current_surface = None
@@ -636,17 +814,41 @@ def main():
                     force_reload = True
                 elif event.key == pygame.K_s:
                     print('Manual Google Drive sync requested.')
-                    if start_background_sync():
+                    if usb_connected and start_background_sync():
                         last_sync = time.monotonic()
 
-        if now - last_sync >= SYNC_INTERVAL_SECONDS:
+        # Graceful USB disconnect/reconnect handling.
+        if now - last_usb_check >= USB_RECHECK_SECONDS:
+            last_usb_check = now
+            now_connected = refresh_usb_paths()
+
+            if now_connected != usb_connected:
+                usb_connected = now_connected
+
+                if usb_connected:
+                    print('CUADRO reconnected. Reloading media library...')
+                    photos = find_photos()
+                    index = 0
+                    current_surface = None
+                    current_path = None
+                    force_reload = True
+                    start_background_sync()
+                    last_sync = time.monotonic()
+                else:
+                    print('CUADRO disconnected. Waiting for reconnection...')
+                    photos = []
+                    index = 0
+                    current_surface = None
+                    current_path = None
+
+        if usb_connected and now - last_sync >= SYNC_INTERVAL_SECONDS:
             print('Automatic Google Drive sync requested...')
             if start_background_sync():
                 last_sync = time.monotonic()
 
         # If a background sync finished, refresh the media list without
         # interrupting the currently displayed photo/video.
-        if sync_completed_generation != seen_sync_generation:
+        if usb_connected and sync_completed_generation != seen_sync_generation:
             seen_sync_generation = sync_completed_generation
             updated_photos = find_photos()
 
@@ -667,16 +869,26 @@ def main():
                 print(f'Media library refreshed: {len(photos)} item(s).')
 
         if not photos:
-            draw_message(screen, [
-                'Raspberry Pi Photo Frame',
-                '',
-                'No photos found on CUADRO.',
-                str(PHOTO_DIR),
-                '',
-                'S = Google Drive sync',
-                'R = rescan USB',
-                'Esc / Q = exit',
-            ])
+            if not usb_connected:
+                draw_message(screen, [
+                    'Raspberry Pi Photo Frame',
+                    '',
+                    'Waiting for CUADRO USB drive...',
+                    'Reconnect the drive and the slideshow will resume automatically.',
+                    '',
+                    'Esc / Q = exit',
+                ])
+            else:
+                draw_message(screen, [
+                    'Raspberry Pi Photo Frame',
+                    '',
+                    'No media found on CUADRO.',
+                    str(PHOTO_DIR),
+                    '',
+                    'S = Google Drive sync',
+                    'R = rescan USB',
+                    'Esc / Q = exit',
+                ])
             clock.tick(5)
             continue
 

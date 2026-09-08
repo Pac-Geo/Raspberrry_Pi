@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Raspberry Pi Photo Frame
+Comment=Start the family photo frame automatically
+Exec=/home/pacgeo/photo_frame/run_photo_frame.sh
+Terminal=false
+X-GNOME-Autostart-enabled=true
+StartupNotify=false
