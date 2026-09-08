@@ -1,5 +1,3 @@
-sudo apt update
-sudo apt install -y python3-gpiozero
 #!/bin/bash
 set -e
 
@@ -8,50 +6,58 @@ AUTOSTART_DIR="$HOME/.config/autostart"
 APPLICATIONS_DIR="$HOME/.local/share/applications"
 CURRENT_USER="$(id -un)"
 
+# Clean leftovers from previous versions.
+pkill -TERM -f "/usr/bin/python3 /home/pacgeo/photo_frame/photo_frame.py" 2>/dev/null || true
+pkill -TERM -f "/home/pacgeo/photo_frame/run_photo_frame.sh" 2>/dev/null || true
+sleep 0.5
+pkill -KILL -f "/usr/bin/python3 /home/pacgeo/photo_frame/photo_frame.py" 2>/dev/null || true
+pkill -KILL -f "/home/pacgeo/photo_frame/run_photo_frame.sh" 2>/dev/null || true
+sudo systemctl disable --now photo-frame-emergency-exit.service 2>/dev/null || true
+sudo systemctl disable --now photo-frame-f12-toggle.service 2>/dev/null || true
+sudo rm -f /etc/systemd/system/photo-frame-emergency-exit.service
+sudo rm -f /etc/systemd/system/photo-frame-f12-toggle.service
+sudo systemctl daemon-reload
+rm -f "$PROJECT_DIR/.stop_requested" "$PROJECT_DIR/.frame_group_pid"
+rm -f "$PROJECT_DIR/.photo_frame.lock"
+
+
+# Remove the old F12 emergency/toggle services.
+sudo systemctl disable --now photo-frame-f12-toggle.service 2>/dev/null || true
+sudo systemctl disable --now photo-frame-emergency-exit.service 2>/dev/null || true
+sudo rm -f /etc/systemd/system/photo-frame-f12-toggle.service
+sudo rm -f /etc/systemd/system/photo-frame-emergency-exit.service
+sudo systemctl daemon-reload
+
+echo "Installing photo-frame controls for user: $CURRENT_USER"
+
+sudo apt update
+sudo apt install -y python3-gpiozero util-linux
+
 mkdir -p "$PROJECT_DIR/logs"
 mkdir -p "$AUTOSTART_DIR"
 mkdir -p "$APPLICATIONS_DIR"
 
 chmod +x "$PROJECT_DIR/run_photo_frame.sh"
+chmod +x "$PROJECT_DIR/start_photo_frame.sh"
 chmod +x "$PROJECT_DIR/stop_photo_frame.sh"
 chmod +x "$PROJECT_DIR/install_photo_frame.sh"
-chmod +x "$PROJECT_DIR/emergency_exit_daemon.py"
 
 cp "$PROJECT_DIR/photo-frame.desktop" "$AUTOSTART_DIR/photo-frame.desktop"
-cp "$PROJECT_DIR/stop-photo-frame.desktop" "$APPLICATIONS_DIR/stop-photo-frame.desktop"
+if [ -f "$PROJECT_DIR/stop-photo-frame.desktop" ]; then
+    cp "$PROJECT_DIR/stop-photo-frame.desktop" "$APPLICATIONS_DIR/stop-photo-frame.desktop"
+fi
 
-# evdev lets the emergency listener read the physical keyboard directly.
-sudo apt-get update
-sudo apt-get install -y python3-evdev
 
-# Install a tiny system service. It runs as root only so it can read
-# /dev/input/event* regardless of which application owns keyboard focus.
-sudo tee /etc/systemd/system/photo-frame-emergency-exit.service >/dev/null <<EOF
-[Unit]
-Description=Photo Frame Global Emergency Exit Key
-After=multi-user.target
+# Clear any stale hard-stop from an older broken version.
+rm -f "$PROJECT_DIR/.stop_requested"
 
-[Service]
-Type=simple
-Environment=PHOTO_FRAME_USER=$CURRENT_USER
-ExecStart=/usr/bin/python3=$PROJECT_DIR/emergency_exit_daemon.py
-Restart=always
-RestartSec=2
+echo
+echo "Installed."
+echo "F12 now toggles:"
+echo "  running -> HARD STOP"
+echo "  stopped -> START"
+echo
+echo "Service status:"
+sudo systemctl --no-pager --full status photo-frame-f12-toggle.service || true
 
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Fix ExecStart typo safely after heredoc expansion.
-sudo sed -i "s#ExecStart=/usr/bin/python3=#ExecStart=/usr/bin/python3 #" /etc/systemd/system/photo-frame-emergency-exit.service
-
-sudo systemctl daemon-reload
-sudo systemctl enable --now photo-frame-emergency-exit.service
-
-printf '\nInstalled photo-frame autostart.\n'
-printf 'It will start automatically the next time the Raspberry Pi desktop logs in.\n'
-printf 'Crash watchdog: enabled by run_photo_frame.sh.\n'
-printf 'Normal Q/Esc exit during photos: does not restart.\n'
-printf '\nGLOBAL EMERGENCY EXIT: press F12 at any time.\n'
-printf 'F12 works even when a video/player window has keyboard focus.\n'
-printf 'No terminal or command is required after this installation.\n\n'
+rm -f "$PROJECT_DIR/.frame_group_pid"

@@ -1,25 +1,32 @@
 #!/bin/bash
 set -u
+
 PROJECT_DIR="/home/pacgeo/photo_frame"
-STOP_FLAG="$PROJECT_DIR/.stop_requested"
+LOCK_FILE="$PROJECT_DIR/.photo_frame.lock"
+PID_FILE="$PROJECT_DIR/.frame_group_pid"
 
 cd "$PROJECT_DIR" || exit 1
 
-# A fresh manual/autostart launch means the user wants the frame running again.
-rm -f "$STOP_FLAG"
+# Only one slideshow/watchdog stack may run at a time.
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+    echo "Another photo-frame instance is already running. This launch will exit."
+    exit 0
+fi
+
+echo "$$" > "$PID_FILE"
+
+cleanup() {
+    rm -f "$PID_FILE"
+}
+trap cleanup EXIT
 
 while true; do
     /usr/bin/python3 "$PROJECT_DIR/photo_frame.py"
     code=$?
 
-    # Emergency stop script creates this before terminating Python/VLC.
-    # Do not let the watchdog immediately restart the application.
-    if [ -f "$STOP_FLAG" ]; then
-        rm -f "$STOP_FLAG"
-        exit 0
-    fi
-
-    # Normal Q/Esc exit: stay stopped.
+    # Q / Esc are intentional normal exits.
+    # Do NOT restart after a clean exit.
     if [ "$code" -eq 0 ]; then
         exit 0
     fi

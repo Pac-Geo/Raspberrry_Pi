@@ -1,27 +1,21 @@
 #!/bin/bash
-# Emergency/manual stop for the entire photo-frame application.
-# Works whether a photo or a separate video-player window currently has focus.
-
 PROJECT_DIR="/home/pacgeo/photo_frame"
-STOP_FLAG="$PROJECT_DIR/.stop_requested"
+PID_FILE="$PROJECT_DIR/.frame_group_pid"
 
-mkdir -p "$PROJECT_DIR"
-touch "$STOP_FLAG"
+if [ -f "$PID_FILE" ]; then
+    GROUP_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
+    if [ -n "$GROUP_PID" ] && kill -0 "$GROUP_PID" 2>/dev/null; then
+        kill -TERM -- "-$GROUP_PID" 2>/dev/null || true
+        sleep 0.5
+        kill -KILL -- "-$GROUP_PID" 2>/dev/null || true
+    fi
+fi
 
-# Stop external video players first, if one is active.
+pkill -TERM -f "/usr/bin/python3 /home/pacgeo/photo_frame/photo_frame.py" 2>/dev/null || true
 pkill -TERM -x vlc 2>/dev/null || true
 pkill -TERM -x cvlc 2>/dev/null || true
 pkill -TERM -x mpv 2>/dev/null || true
 
-# Stop the Python slideshow.
-pkill -TERM -f '/home/pacgeo/photo_frame/photo_frame.py' 2>/dev/null || true
+rm -f "$PID_FILE"
 
-sleep 1
-
-# Escalate only if something ignored TERM.
-pkill -KILL -x vlc 2>/dev/null || true
-pkill -KILL -x cvlc 2>/dev/null || true
-pkill -KILL -x mpv 2>/dev/null || true
-pkill -KILL -f '/home/pacgeo/photo_frame/photo_frame.py' 2>/dev/null || true
-
-echo "Photo frame stopped."
+echo "PHOTO FRAME STOPPED."
