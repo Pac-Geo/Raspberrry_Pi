@@ -415,3 +415,34 @@ N and P are not used for navigation.
 The arrow-key mapping is now centralized in photo_frame.py so the same
 Left/Right controls can be connected to video playback when video work resumes.
 No video-playback behavior was changed in this version.
+
+
+V5.4 PROGRESSIVE DRIVE SYNC
+---------------------------
+Google Drive downloading and slideshow playback now happen progressively.
+
+Behavior with an empty PHOTOS folder:
+
+  Photo 1 finishes downloading
+      -> it is added to the slideshow within about 1 second
+      -> slideshow starts immediately
+
+  While Photo 1 is being displayed:
+      -> Photo 2 continues downloading in the background
+
+  Photo 2 finishes
+      -> it is added to the live slideshow list
+
+  While the slideshow continues:
+      -> Photo 3, Photo 4, and the rest continue downloading
+
+The frame DOES NOT wait for the complete Drive sync before showing photos.
+
+Safety:
+  Downloads still use DOWNLOAD.TMP.
+  find_photos() ignores DOWNLOAD.TMP.
+  A photo becomes visible to the slideshow only after the full file has
+  downloaded and os.replace() has renamed it to its final filename.
+
+Config:
+  "progressive_media_scan_seconds": 1.0

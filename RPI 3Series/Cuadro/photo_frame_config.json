@@ -31,5 +31,6 @@
   "upload_overlay_enabled": true,
   "upload_overlay_width_fraction": 0.12,
   "upload_overlay_margin_px": 30,
-  "upload_overlay_opacity": 235
+  "upload_overlay_opacity": 235,
+  "progressive_media_scan_seconds": 1.0
 }

@@ -971,6 +971,8 @@ def main():
     current_path = None
     last_slide_change = 0.0
     last_sync = time.monotonic()
+    last_media_scan = 0.0
+    media_scan_interval = float(CONFIG.get("progressive_media_scan_seconds", 1.0))
     clock = pygame.time.Clock()
     running = True
     usb_connected = connected
@@ -1168,13 +1170,32 @@ def main():
             if start_background_sync():
                 last_sync = time.monotonic()
 
-        # If a background sync finished, refresh the media list without
-        # interrupting the currently displayed photo/video.
-        if usb_connected and sync_completed_generation != seen_sync_generation:
-            seen_sync_generation = sync_completed_generation
+        # Progressive media discovery:
+        # While Drive sync is still downloading, rescan the USB directory so
+        # each COMPLETED file becomes available to the slideshow immediately.
+        # DOWNLOAD.TMP is ignored by find_photos(), so partial files can never
+        # be displayed.
+        sync_just_finished = sync_completed_generation != seen_sync_generation
+        should_progressive_scan = (
+            usb_connected
+            and (
+                sync_in_progress
+                or not photos
+                or sync_just_finished
+            )
+            and (now - last_media_scan >= media_scan_interval)
+        )
+
+        if should_progressive_scan:
+            last_media_scan = now
+
+            if sync_just_finished:
+                seen_sync_generation = sync_completed_generation
+
             updated_photos = find_photos()
 
             if updated_photos != photos:
+                previous_count = len(photos)
                 current_name = current_path.name if current_path is not None else None
                 photos = updated_photos
 
@@ -1188,7 +1209,23 @@ def main():
                 else:
                     index = min(index, max(0, len(photos) - 1))
 
-                print(f'Media library refreshed: {len(photos)} item(s).')
+                print(
+                    f'Progressive media refresh: '
+                    f'{previous_count} -> {len(photos)} item(s).'
+                )
+
+                # If the frame had nothing to show, display the first completed
+                # download immediately instead of waiting for the whole sync.
+                if previous_count == 0 and photos:
+                    index = 0
+                    current_surface = None
+                    current_path = None
+                    last_slide_change = 0.0
+                    force_reload = True
+                    print(
+                        'First completed Drive download is ready - '
+                        'starting slideshow now while sync continues.'
+                    )
 
         if not photos:
             if not usb_connected:
