@@ -326,3 +326,23 @@ If desired, this value can later be changed:
   1.5 = more conservative / sharper small photos
   2.0 = current balance
   3.0 = fills more space but exposes more source-image softness
+
+
+V4.9 20-MINUTE LOW-POWER SLEEP
+------------------------------
+The inactivity timeout is now:
+
+  1200 seconds = 20 minutes
+
+After 20 minutes with no qualified motion:
+  - slideshow rendering pauses
+  - the screen is blanked
+  - HDMI/display output is powered off
+  - Raspberry Pi remains running so the PIR can still be read
+  - qualified PIR motion wakes the display and resumes the slideshow
+
+NOTE:
+  Raspberry Pi 3B+ does not provide an ESP32-style software deep-sleep mode
+  that can shut the Pi almost completely down and then wake directly from this
+  PIR GPIO in the current setup. This version uses the deepest reliable
+  software sleep that still allows automatic PIR wake without extra hardware.

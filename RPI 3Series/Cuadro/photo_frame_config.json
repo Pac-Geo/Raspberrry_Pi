@@ -17,7 +17,7 @@
   "pir_enabled": true,
   "pir_bcm_pin": 17,
   "pir_poll_seconds": 0.1,
-  "inactivity_timeout_seconds": 45,
+  "inactivity_timeout_seconds": 1200,
   "display_sleep_enabled": true,
   "pir_debug_seconds": 5,
   "display_sleep_mode": "hdmi_power_off",
