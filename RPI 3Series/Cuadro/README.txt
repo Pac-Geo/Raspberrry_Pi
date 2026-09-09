@@ -389,3 +389,14 @@ photo_frame.py:
   Path(__file__).resolve().parent / "upload_qr_overlay.png"
 
 No other slideshow behavior was changed.
+
+
+V5.2 QR HALF SIZE
+-----------------
+The QR upload overlay is now 50% smaller.
+
+Old width:
+  24% of the portrait frame width
+
+New width:
+  12% of the portrait frame width

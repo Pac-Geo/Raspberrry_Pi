@@ -29,7 +29,7 @@
   "photo_scaling_mode": "fit",
   "max_photo_upscale_factor": 2.0,
   "upload_overlay_enabled": true,
-  "upload_overlay_width_fraction": 0.24,
+  "upload_overlay_width_fraction": 0.12,
   "upload_overlay_margin_px": 30,
   "upload_overlay_opacity": 235
 }
