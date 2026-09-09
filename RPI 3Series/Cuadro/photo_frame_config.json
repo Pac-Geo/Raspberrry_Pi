@@ -20,7 +20,7 @@
   "inactivity_timeout_seconds": 1200,
   "display_sleep_enabled": true,
   "pir_debug_seconds": 5,
-  "display_sleep_mode": "hdmi_power_off",
+  "display_sleep_mode": "hardware_power_off",
   "pir_low_stable_seconds": 3.0,
   "pir_startup_ignore_seconds": 30,
   "pir_high_confirm_seconds": 0.75,
@@ -36,5 +36,10 @@
   "photo_frame_cache_items": 6,
   "upload_overlay_photo_margin_fraction": 0.025,
   "sharpen_upscaled_photos": false,
-  "accept_extended_image_formats": true
+  "accept_extended_image_formats": true,
+  "storage_reserve_mb": 2048,
+  "photo_index_enabled": true,
+  "photo_index_full_rescan_seconds": 3600,
+  "photo_index_hash_background": true,
+  "display_power_wake_delay_seconds": 0.4
 }

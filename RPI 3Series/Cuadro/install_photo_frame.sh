@@ -31,7 +31,7 @@ sudo systemctl daemon-reload
 echo "Installing photo-frame controls for user: $CURRENT_USER"
 
 sudo apt update
-sudo apt install -y python3-gpiozero util-linux python3-pip python3-pil libheif1
+sudo apt install -y python3-gpiozero util-linux python3-pip python3-pil libheif1 x11-xserver-utils
 
 mkdir -p "$PROJECT_DIR/logs"
 mkdir -p "$AUTOSTART_DIR"
@@ -84,3 +84,10 @@ except Exception as exc:
     print("HEIC functional decoder test: FAILED ->", exc)
     raise SystemExit(1)
 PYTEST
+
+
+# Optional Wayland display power tools. The frame also supports vcgencmd/xset,
+# so installation continues if these packages are unavailable on this Pi OS.
+echo "Installing optional Wayland display power helpers when available..."
+sudo apt install -y wlopm 2>/dev/null || true
+sudo apt install -y wlr-randr 2>/dev/null || true

@@ -696,3 +696,43 @@ giving HEIC a different orientation pipeline from the older JPEG files.
 The original photo files are never rewritten, converted, or recompressed.
 
 All other slideshow behavior is left unchanged.
+
+
+V6.7 RELIABILITY / INDEX / REAL SLEEP
+-------------------------------------
+Visual behavior, 12% QR placement, single global rotation, FIT rendering,
+HEIC handling, slideshow timing, and Drive bridge settings are left intact.
+
+Added:
+1. STARTUP HEALTH CHECK
+   Reports USB, Drive reachability, HEIC decoder, PIR, QR file, readable media
+   count, index path, free storage, and available display-power backend.
+
+2. CORRUPT / UNREADABLE IMAGE HANDLING
+   A bad still image is logged by filename, marked unreadable in the index,
+   removed from the active slideshow, and skipped without stopping playback.
+   Replacing the file or pressing R for a full rescan gives it a fresh chance.
+
+3. DUPLICATE DETECTION
+   New Drive images are SHA-256 hashed. If a differently named file is
+   byte-for-byte identical to an existing image, the duplicate is not stored.
+   The Drive file ID is remembered so it is not repeatedly downloaded later.
+
+4. REAL 20-MINUTE DISPLAY SLEEP
+   After 1200 seconds of inactivity the frame blanks first, then requests real
+   display/HDMI power-off using the best available backend: wlopm, vcgencmd,
+   xset DPMS, or wlr-randr. PIR/keyboard/mouse powers the display back on and
+   redraws the current slide. If no backend works, black-screen fallback remains.
+
+5. STORAGE PROTECTION
+   Keeps a 2048 MiB reserve on CUADRO. A sync stops cleanly before a download
+   would consume that reserve.
+
+6. PERSISTENT PHOTO INDEX
+   Stored at:
+     CUADRO/.photo_frame_cache/photo_index.json
+   Tracks filename, relative path, size, modified date, type, SHA-256 hash,
+   readability/error state, and Drive-file handling metadata.
+   The slideshow reads this index instead of recursively walking the entire
+   PHOTOS tree every second. A full scan runs hourly and when R is pressed.
+   Missing SHA-256 values are filled in by a background hashing worker.

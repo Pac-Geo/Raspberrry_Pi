@@ -51,6 +51,7 @@ import io
 import json
 import os
 import re
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -93,6 +94,11 @@ DEFAULT_CONFIG = {
     'download_retries': 3,
     'http_timeout_seconds': 30,
     'sharpen_upscaled_photos': False,
+    'storage_reserve_mb': 2048,
+    'photo_index_enabled': True,
+    'photo_index_full_rescan_seconds': 3600,
+    'photo_index_hash_background': True,
+    'display_power_wake_delay_seconds': 0.40,
     'log_file': '/home/pacgeo/photo_frame/logs/photo_frame.log',
     'log_max_bytes': 5 * 1024 * 1024,
 }
@@ -129,7 +135,7 @@ def save_config_value(key, value):
         temp_path = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + '.tmp')
         with temp_path.open('w', encoding='utf-8') as handle:
             json.dump(data, handle, indent=2)
-            handle.write('\\n')
+            handle.write('\n')
         os.replace(temp_path, CONFIG_PATH)
         CONFIG[key] = value
         return True
@@ -415,13 +421,146 @@ def media_sort_key(path):
     return parts
 
 
-def find_photos():
-    """Recursively scan PHOTOS so family folders define slideshow ordering."""
-    if not ensure_photo_directory():
-        return []
+PHOTO_INDEX_VERSION = 1
+photo_index_lock = threading.RLock()
+photo_index_cache = None
+photo_index_cache_root = None
+index_hash_thread = None
+index_hash_running = False
 
+
+def _blank_photo_index():
+    return {
+        'version': PHOTO_INDEX_VERSION,
+        'updated_unix': time.time(),
+        'files': {},
+        'drive_files': {},
+    }
+
+
+def photo_index_path():
+    if USB_ROOT is None:
+        return None
+    return USB_ROOT / '.photo_frame_cache' / 'photo_index.json'
+
+
+def _load_photo_index_locked():
+    global photo_index_cache, photo_index_cache_root
+
+    if USB_ROOT is None:
+        return _blank_photo_index()
+
+    root_key = str(USB_ROOT)
+    if photo_index_cache is not None and photo_index_cache_root == root_key:
+        return photo_index_cache
+
+    path = photo_index_path()
+    data = None
+    if path is not None and path.exists():
+        try:
+            with path.open('r', encoding='utf-8') as handle:
+                loaded = json.load(handle)
+            if (
+                isinstance(loaded, dict)
+                and isinstance(loaded.get('files'), dict)
+                and isinstance(loaded.get('drive_files', {}), dict)
+            ):
+                data = loaded
+        except Exception as exc:
+            print(f'Photo index could not be read; rebuilding: {exc}')
+
+    if data is None:
+        data = _blank_photo_index()
+
+    data['version'] = PHOTO_INDEX_VERSION
+    data.setdefault('files', {})
+    data.setdefault('drive_files', {})
+    photo_index_cache = data
+    photo_index_cache_root = root_key
+    return data
+
+
+def _save_photo_index_locked(data):
+    if USB_ROOT is None:
+        return False
+
+    path = photo_index_path()
     try:
-        media = [
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data['updated_unix'] = time.time()
+        temp_path = path.with_suffix('.json.tmp')
+        with temp_path.open('w', encoding='utf-8') as handle:
+            json.dump(data, handle, indent=2, sort_keys=True)
+            handle.write('\n')
+        os.replace(temp_path, path)
+        return True
+    except Exception as exc:
+        print(f'WARNING: could not save photo index: {exc}')
+        return False
+
+
+def file_sha256(path, chunk_size=1024 * 1024):
+    digest = hashlib.sha256()
+    with path.open('rb') as handle:
+        while True:
+            chunk = handle.read(chunk_size)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _relative_media_path(path):
+    try:
+        return path.relative_to(PHOTO_DIR).as_posix()
+    except Exception:
+        return path.name
+
+
+def _entry_from_path(path, previous=None, sha256_value=None, readable=None, error=None):
+    stat_info = path.stat()
+    same_file = (
+        previous is not None
+        and int(previous.get('size', -1)) == stat_info.st_size
+        and int(previous.get('mtime_ns', -1)) == stat_info.st_mtime_ns
+    )
+
+    if sha256_value is None and same_file:
+        sha256_value = previous.get('sha256')
+
+    if readable is None:
+        if same_file:
+            readable = previous.get('readable', True)
+        else:
+            readable = True
+
+    if error is None and same_file:
+        error = previous.get('error')
+
+    return {
+        'filename': path.name,
+        'relative_path': _relative_media_path(path),
+        'size': stat_info.st_size,
+        'mtime_ns': stat_info.st_mtime_ns,
+        'modified': time.strftime(
+            '%Y-%m-%d %H:%M:%S',
+            time.localtime(stat_info.st_mtime),
+        ),
+        'type': path.suffix.lower(),
+        'sha256': sha256_value,
+        'readable': bool(readable),
+        'error': error,
+    }
+
+
+def rebuild_photo_index(reset_readability=False):
+    """Full recursive scan. Normally needed only once or after manual USB edits."""
+    if not ensure_photo_directory():
+        return _blank_photo_index()
+
+    print('Photo index: full media scan...')
+    try:
+        discovered = [
             p for p in PHOTO_DIR.rglob('*')
             if p.is_file()
             and p.suffix.lower() in SUPPORTED_EXTENSIONS
@@ -430,10 +569,247 @@ def find_photos():
         ]
     except OSError as exc:
         print(f'Could not scan media folder: {exc}')
+        return _blank_photo_index()
+
+    with photo_index_lock:
+        data = _load_photo_index_locked()
+        old_files = data.get('files', {})
+        new_files = {}
+
+        for path in discovered:
+            rel = _relative_media_path(path)
+            try:
+                entry = _entry_from_path(path, old_files.get(rel))
+                if reset_readability:
+                    entry['readable'] = True
+                    entry['error'] = None
+                new_files[rel] = entry
+            except OSError as exc:
+                print(f'Index skipped inaccessible file {path}: {exc}')
+
+        data['files'] = new_files
+        _save_photo_index_locked(data)
+
+    print(f'Photo index: {len(new_files)} media item(s) indexed.')
+    return data
+
+
+def _ensure_photo_index():
+    if not bool(CONFIG.get('photo_index_enabled', True)):
+        return rebuild_photo_index()
+
+    with photo_index_lock:
+        data = _load_photo_index_locked()
+        path = photo_index_path()
+        needs_first_build = path is None or not path.exists()
+
+    if needs_first_build:
+        return rebuild_photo_index()
+    return data
+
+
+def upsert_media_index(path, readable=None, error=None, sha256_value=None):
+    if not bool(CONFIG.get('photo_index_enabled', True)):
+        return
+    try:
+        rel = _relative_media_path(path)
+        with photo_index_lock:
+            data = _load_photo_index_locked()
+            previous = data['files'].get(rel)
+            entry = _entry_from_path(
+                path,
+                previous=previous,
+                sha256_value=sha256_value,
+                readable=readable,
+                error=error,
+            )
+            if readable is True:
+                entry['error'] = None
+            data['files'][rel] = entry
+            _save_photo_index_locked(data)
+    except Exception as exc:
+        print(f'WARNING: could not update index for {path.name}: {exc}')
+
+
+def mark_media_unreadable(path, error):
+    print(f'UNREADABLE IMAGE SKIPPED: {path.name} -> {error}')
+    upsert_media_index(path, readable=False, error=str(error))
+
+
+def mark_media_readable(path):
+    upsert_media_index(path, readable=True, error=None)
+
+
+def record_drive_file(photo, status, stored_as=None, duplicate_of=None, sha256_value=None):
+    if not bool(CONFIG.get('photo_index_enabled', True)):
+        return
+    with photo_index_lock:
+        data = _load_photo_index_locked()
+        data['drive_files'][str(photo['id'])] = {
+            'name': str(photo.get('name', '')),
+            'size': int(photo.get('size', 0)),
+            'mimeType': str(photo.get('mimeType', '')),
+            'modified': str(photo.get('modified', '')),
+            'status': status,
+            'stored_as': stored_as,
+            'duplicate_of': duplicate_of,
+            'sha256': sha256_value,
+        }
+        _save_photo_index_locked(data)
+
+
+def drive_file_already_handled(photo):
+    if not bool(CONFIG.get('photo_index_enabled', True)):
+        return False
+    with photo_index_lock:
+        data = _load_photo_index_locked()
+        entry = data.get('drive_files', {}).get(str(photo['id']))
+        if not entry or int(entry.get('size', -1)) != int(photo.get('size', -2)):
+            return False
+        rel = entry.get('stored_as') or entry.get('duplicate_of')
+
+    if not rel or PHOTO_DIR is None:
+        return False
+    try:
+        return (PHOTO_DIR / rel).is_file()
+    except OSError:
+        return False
+
+
+def find_duplicate_by_hash(sha256_value, size, exclude_path=None):
+    if not sha256_value or not bool(CONFIG.get('photo_index_enabled', True)):
+        return None
+
+    with photo_index_lock:
+        data = _load_photo_index_locked()
+        candidates = [
+            (rel, dict(entry))
+            for rel, entry in data.get('files', {}).items()
+            if int(entry.get('size', -1)) == int(size)
+            and str(entry.get('type', '')).lower() in IMAGE_EXTENSIONS
+        ]
+
+    for rel, entry in candidates:
+        path = PHOTO_DIR / rel
+        if exclude_path is not None:
+            try:
+                if path.resolve() == exclude_path.resolve():
+                    continue
+            except OSError:
+                pass
+        if not path.is_file():
+            continue
+
+        existing_hash = entry.get('sha256')
+        if not existing_hash:
+            try:
+                existing_hash = file_sha256(path)
+                upsert_media_index(path, sha256_value=existing_hash)
+            except Exception as exc:
+                print(f'Could not hash existing file {path.name}: {exc}')
+                continue
+
+        if existing_hash == sha256_value:
+            return path
+
+    return None
+
+
+def _index_hash_worker():
+    global index_hash_running
+    try:
+        with photo_index_lock:
+            data = _load_photo_index_locked()
+            pending = [
+                rel for rel, entry in data.get('files', {}).items()
+                if str(entry.get('type', '')).lower() in IMAGE_EXTENSIONS
+                and not entry.get('sha256')
+            ]
+
+        if pending:
+            print(f'Photo index: hashing {len(pending)} image(s) in background...')
+
+        for rel in pending:
+            if PHOTO_DIR is None:
+                break
+            path = PHOTO_DIR / rel
+            if not path.is_file():
+                continue
+            try:
+                digest = file_sha256(path)
+                upsert_media_index(path, sha256_value=digest)
+            except Exception as exc:
+                print(f'Background hash skipped {path.name}: {exc}')
+            time.sleep(0.02)
+
+        if pending:
+            print('Photo index: background hashes complete.')
+    finally:
+        with photo_index_lock:
+            index_hash_running = False
+
+
+def start_index_hash_worker():
+    global index_hash_thread, index_hash_running
+    if not bool(CONFIG.get('photo_index_hash_background', True)):
+        return False
+    with photo_index_lock:
+        if index_hash_running:
+            return False
+        index_hash_running = True
+        index_hash_thread = threading.Thread(
+            target=_index_hash_worker,
+            name='photo-index-hash',
+            daemon=True,
+        )
+        index_hash_thread.start()
+    return True
+
+
+def find_photos(force_rebuild=False, reset_readability=False):
+    """Return indexed readable media without recursively rescanning every second."""
+    if not ensure_photo_directory():
         return []
 
-    return sorted(media, key=media_sort_key)
+    if force_rebuild or not bool(CONFIG.get('photo_index_enabled', True)):
+        data = rebuild_photo_index(reset_readability=reset_readability)
+    else:
+        data = _ensure_photo_index()
 
+    media = []
+    changed = False
+    with photo_index_lock:
+        files = list(data.get('files', {}).items())
+
+    for rel, entry in files:
+        path = PHOTO_DIR / rel
+        try:
+            if not path.is_file():
+                with photo_index_lock:
+                    data['files'].pop(rel, None)
+                changed = True
+                continue
+
+            stat_info = path.stat()
+            if (
+                int(entry.get('size', -1)) != stat_info.st_size
+                or int(entry.get('mtime_ns', -1)) != stat_info.st_mtime_ns
+            ):
+                # File was replaced/edited: give it a fresh chance to display.
+                upsert_media_index(path, readable=True, error=None, sha256_value=None)
+                entry = dict(entry)
+                entry['readable'] = True
+
+            if entry.get('readable', True):
+                media.append(path)
+        except OSError:
+            continue
+
+    if changed:
+        with photo_index_lock:
+            _save_photo_index_locked(data)
+
+    return sorted(media, key=media_sort_key)
 
 def file_matches_size(path, expected_size):
     try:
@@ -479,6 +855,7 @@ def fetch_drive_photo_list():
                 'name': str(item['name']),
                 'mimeType': str(item['mimeType']),
                 'size': int(item['size']),
+                'modified': str(item.get('modified', '')),
             })
         except (KeyError, TypeError, ValueError):
             print(f'Skipping malformed Drive entry: {item}')
@@ -531,20 +908,69 @@ def fetch_drive_chunk(photo, offset, requested_length):
     return decoded
 
 
+def storage_status(required_bytes=0):
+    if PHOTO_DIR is None:
+        return False, 0, 0, 0
+    try:
+        usage = shutil.disk_usage(PHOTO_DIR)
+        reserve = int(float(CONFIG.get('storage_reserve_mb', 2048)) * 1024 * 1024)
+        enough = (usage.free - int(required_bytes)) >= reserve
+        return enough, usage.free, usage.total, reserve
+    except Exception as exc:
+        print(f'WARNING: could not check free storage: {exc}')
+        return False, 0, 0, 0
+
+
+def format_bytes(value):
+    value = float(value)
+    for unit in ('B', 'KiB', 'MiB', 'GiB', 'TiB'):
+        if value < 1024.0 or unit == 'TiB':
+            return f'{value:.1f} {unit}'
+        value /= 1024.0
+
+
 def download_photo(photo):
     if not is_supported_drive_media(photo):
-        return False
+        return 'skipped'
+
     size = int(photo['size'])
     if size <= 0 or size > MAX_PHOTO_SIZE:
         print(f"Skipping size outside limit: {photo['name']}")
-        return False
+        return 'skipped'
     if not ensure_photo_directory():
-        return False
+        return 'failed'
+
+    enough, free_bytes, total_bytes, reserve_bytes = storage_status(size)
+    if not enough:
+        print(
+            f"STORAGE PROTECTION: not downloading {photo['name']}. "
+            f"Free={format_bytes(free_bytes)}, "
+            f"reserve={format_bytes(reserve_bytes)}, "
+            f"needed={format_bytes(size)}"
+        )
+        return 'no_space'
 
     safe_name = sanitize_filename(photo['name'])
     final_path = PHOTO_DIR / safe_name
+
+    # Preserve the old fast path, while also recording the Drive ID so future
+    # syncs know this specific cloud file has already been handled.
     if file_matches_size(final_path, size):
-        return True
+        try:
+            upsert_media_index(final_path)
+            rel = _relative_media_path(final_path)
+            with photo_index_lock:
+                data = _load_photo_index_locked()
+                digest = data.get('files', {}).get(rel, {}).get('sha256')
+            record_drive_file(
+                photo,
+                status='stored',
+                stored_as=rel,
+                sha256_value=digest,
+            )
+        except Exception:
+            pass
+        return 'already'
 
     temp_path = PHOTO_DIR / 'DOWNLOAD.TMP'
     try:
@@ -576,17 +1002,54 @@ def download_photo(photo):
         if temp_path.stat().st_size != size:
             raise RuntimeError('Downloaded byte count verification failed')
 
+        # Content hash is computed before the final rename. This lets us catch
+        # identical photos even when Google Drive filenames are different.
+        new_hash = file_sha256(temp_path)
+        duplicate = find_duplicate_by_hash(
+            new_hash,
+            size,
+            exclude_path=final_path,
+        )
+
+        if duplicate is not None:
+            duplicate_rel = _relative_media_path(duplicate)
+            temp_path.unlink(missing_ok=True)
+            record_drive_file(
+                photo,
+                status='duplicate',
+                duplicate_of=duplicate_rel,
+                sha256_value=new_hash,
+            )
+            print(
+                f'DUPLICATE NOT STORED: {photo["name"]} is byte-for-byte '
+                f'identical to {duplicate.name}'
+            )
+            return 'duplicate'
+
         os.replace(temp_path, final_path)
+        upsert_media_index(
+            final_path,
+            readable=True,
+            error=None,
+            sha256_value=new_hash,
+        )
+        rel = _relative_media_path(final_path)
+        record_drive_file(
+            photo,
+            status='stored',
+            stored_as=rel,
+            sha256_value=new_hash,
+        )
         print(f'Saved: {final_path}')
-        return True
+        return 'downloaded'
+
     except Exception as exc:
         print(f"Download FAILED for {photo['name']}: {exc}")
         try:
             temp_path.unlink(missing_ok=True)
         except OSError:
             pass
-        return False
-
+        return 'failed'
 
 def sync_drive_to_usb():
     if not ensure_photo_directory():
@@ -597,31 +1060,49 @@ def sync_drive_to_usb():
     print('GOOGLE DRIVE -> USB SYNC')
     print('========================')
 
-    if not ensure_photo_directory():
-        print('Cannot sync: CUADRO USB drive is not mounted.')
-        return False
-
     try:
         photos = fetch_drive_photo_list()
     except Exception as exc:
         print(f'Drive list request failed: {exc}')
         return False
 
-    downloaded = skipped = failed = 0
+    downloaded = skipped = failed = duplicates = 0
+    storage_stopped = False
+
     for photo in photos:
         size = int(photo['size'])
         if size <= 0 or size > MAX_PHOTO_SIZE or not is_supported_drive_media(photo):
             skipped += 1
             continue
 
-        final_path = PHOTO_DIR / sanitize_filename(photo['name'])
-        if file_matches_size(final_path, size):
-            print(f'Already on USB: {final_path.name}')
+        if drive_file_already_handled(photo):
+            print(f'Already handled from Drive: {photo["name"]}')
             skipped += 1
             continue
 
-        if download_photo(photo):
+        final_path = PHOTO_DIR / sanitize_filename(photo['name'])
+        if file_matches_size(final_path, size):
+            print(f'Already on USB: {final_path.name}')
+            upsert_media_index(final_path)
+            record_drive_file(
+                photo,
+                status='stored',
+                stored_as=_relative_media_path(final_path),
+            )
+            skipped += 1
+            continue
+
+        result = download_photo(photo)
+        if result == 'downloaded':
             downloaded += 1
+        elif result == 'duplicate':
+            duplicates += 1
+        elif result in ('already', 'skipped'):
+            skipped += 1
+        elif result == 'no_space':
+            storage_stopped = True
+            print('Drive sync stopped cleanly to preserve free USB space.')
+            break
         else:
             failed += 1
 
@@ -629,10 +1110,12 @@ def sync_drive_to_usb():
     print('SYNC COMPLETE')
     print('========================')
     print(f'Downloaded: {downloaded}')
+    print(f'Duplicates: {duplicates}')
     print(f'Skipped:    {skipped}')
     print(f'Failed:     {failed}')
-    return failed == 0
-
+    if storage_stopped:
+        print('Storage:    STOPPED AT RESERVE LIMIT')
+    return failed == 0 and not storage_stopped
 
 def _background_sync_worker():
     global sync_in_progress, sync_completed_generation
@@ -643,6 +1126,7 @@ def _background_sync_worker():
         with sync_lock:
             sync_in_progress = False
             sync_completed_generation += 1
+        start_index_hash_worker()
 
 
 def start_background_sync():
@@ -940,26 +1424,132 @@ def draw_message(screen, lines):
     pygame.display.flip()
 
 
-def _run_quiet(command):
+def _run_quiet(command, env=None):
     try:
         result = subprocess.run(
             command,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
+            env=env,
         )
         return result.returncode == 0
     except Exception:
         return False
 
 
+def _display_environment():
+    env = os.environ.copy()
+    if not env.get('DISPLAY') and Path('/tmp/.X11-unix/X0').exists():
+        env['DISPLAY'] = ':0'
+    return env
+
+
+def _wayland_output_names():
+    names = []
+    if shutil.which('wlopm'):
+        try:
+            result = subprocess.run(
+                ['wlopm'],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    parts = line.strip().split()
+                    if parts and ('HDMI' in parts[0].upper() or 'DP-' in parts[0].upper()):
+                        names.append(parts[0])
+        except Exception:
+            pass
+
+    if not names and shutil.which('wlr-randr'):
+        try:
+            result = subprocess.run(
+                ['wlr-randr'],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    if line and not line[0].isspace():
+                        name = line.split()[0]
+                        if 'HDMI' in name.upper() or 'DP-' in name.upper():
+                            names.append(name)
+        except Exception:
+            pass
+
+    return list(dict.fromkeys(names))
+
+
+def display_power_backend():
+    if os.environ.get('WAYLAND_DISPLAY') and shutil.which('wlopm'):
+        return 'wlopm/Wayland DPMS'
+    if shutil.which('vcgencmd'):
+        return 'vcgencmd HDMI power'
+    if shutil.which('xset'):
+        return 'xset DPMS'
+    if os.environ.get('WAYLAND_DISPLAY') and shutil.which('wlr-randr'):
+        return 'wlr-randr output power'
+    return None
+
+
 def set_display_power(on):
-    """
-    Safe visual sleep/wake. Keep HDMI electrically active so the screen can
-    always be restored by the application.
-    """
-    print(f"Display visual state: {'ON' if on else 'BLACK/SLEEP'}")
-    return True
+    """Actually request HDMI/display power OFF/ON, with safe fallbacks."""
+    action = 'ON' if on else 'OFF'
+    env = _display_environment()
+
+    # Wayland-native DPMS is the cleanest method on modern Raspberry Pi OS.
+    if os.environ.get('WAYLAND_DISPLAY') and shutil.which('wlopm'):
+        outputs = _wayland_output_names()
+        if outputs:
+            ok = True
+            for output in outputs:
+                ok = _run_quiet(
+                    ['wlopm', '--on' if on else '--off', output],
+                    env=env,
+                ) and ok
+            if ok:
+                print(f'Display power {action}: wlopm')
+                return True
+
+    # Native X11 DPMS when not running a Wayland compositor.
+    if not os.environ.get('WAYLAND_DISPLAY') and shutil.which('xset') and env.get('DISPLAY'):
+        if _run_quiet(['xset', 'dpms', 'force', 'on' if on else 'off'], env=env):
+            print(f'Display power {action}: xset DPMS')
+            return True
+
+    # Raspberry Pi firmware method. Useful on legacy/firmware-controlled HDMI.
+    if shutil.which('vcgencmd'):
+        if _run_quiet(['vcgencmd', 'display_power', '1' if on else '0'], env=env):
+            print(f'Display power {action}: vcgencmd')
+            return True
+
+    # Last Wayland fallback. This disables/enables the HDMI output itself.
+    if os.environ.get('WAYLAND_DISPLAY') and shutil.which('wlr-randr'):
+        outputs = _wayland_output_names()
+        if outputs:
+            ok = True
+            for output in outputs:
+                ok = _run_quiet(
+                    ['wlr-randr', '--output', output, '--on' if on else '--off'],
+                    env=env,
+                ) and ok
+            if ok:
+                print(f'Display power {action}: wlr-randr')
+                return True
+
+    if shutil.which('xset') and env.get('DISPLAY'):
+        if _run_quiet(['xset', 'dpms', 'force', 'on' if on else 'off'], env=env):
+            print(f'Display power {action}: xset DPMS fallback')
+            return True
+
+    print(
+        f'WARNING: no working hardware display-power method for {action}; '
+        'application black-screen fallback remains active.'
+    )
+    return False
 
 def setup_pir():
     if not bool(CONFIG.get("pir_enabled", True)):
@@ -1171,6 +1761,65 @@ def get_cached_photo_frame(
     return surface
 
 
+def startup_health_check(connected, pir, upload_overlay, photos):
+    print('\n========================')
+    print('STARTUP HEALTH CHECK')
+    print('========================')
+
+    if connected and USB_ROOT is not None:
+        print(f'[OK] USB: {USB_ROOT}')
+    else:
+        print('[FAIL] USB: CUADRO not mounted')
+
+    try:
+        payload = request_json(
+            {'action': 'list', 'token': APPS_SCRIPT_TOKEN},
+            retries=1,
+        )
+        print(f"[OK] Drive: reachable ({int(payload.get('count', len(payload.get('photos', []))))} item(s))")
+    except Exception as exc:
+        print(f'[FAIL] Drive: {exc}')
+
+    if pillow_heif is not None:
+        print('[OK] HEIC/HEIF: pillow-heif ready')
+    else:
+        print('[FAIL] HEIC/HEIF: decoder unavailable')
+
+    if pir is not None:
+        print(f"[OK] PIR: BCM GPIO{int(CONFIG.get('pir_bcm_pin', 17))}")
+    elif bool(CONFIG.get('pir_enabled', True)):
+        print('[FAIL] PIR: enabled but unavailable')
+    else:
+        print('[OFF] PIR: disabled in config')
+
+    qr_path = Path(__file__).resolve().parent / 'upload_qr_overlay.png'
+    if upload_overlay is not None and qr_path.exists():
+        print(f'[OK] QR: {qr_path.name}')
+    else:
+        print(f'[FAIL] QR: {qr_path.name} missing/unreadable')
+
+    print(f'[OK] Photo/media count: {len(photos)} readable indexed item(s)')
+
+    index_path = photo_index_path()
+    print(f'[OK] Photo index: {index_path if index_path else "waiting for USB"}')
+
+    if connected:
+        enough, free_bytes, total_bytes, reserve_bytes = storage_status(0)
+        storage_label = 'OK' if enough else 'LOW'
+        print(
+            f'[{storage_label}] Storage: {format_bytes(free_bytes)} free of '
+            f'{format_bytes(total_bytes)}; reserve {format_bytes(reserve_bytes)}'
+        )
+
+    backend = display_power_backend()
+    if backend:
+        print(f'[OK] Display sleep power control: {backend}')
+    else:
+        print('[WARN] Display sleep power control: black-screen fallback only')
+
+    print('========================\n')
+
+
 def logical_size_for_rotation(physical_w, physical_h, rotation):
     rotation = int(rotation) % 360
     if rotation in (90, 270):
@@ -1189,7 +1838,6 @@ def main():
 
     if connected:
         print('CUADRO USB drive mounted.')
-        start_background_sync()
     else:
         print('CUADRO USB drive is disconnected. Slideshow will wait and reconnect automatically.')
 
@@ -1240,6 +1888,8 @@ def main():
     last_sync = time.monotonic()
     last_media_scan = 0.0
     media_scan_interval = float(CONFIG.get("progressive_media_scan_seconds", 1.0))
+    full_index_scan_interval = float(CONFIG.get('photo_index_full_rescan_seconds', 3600))
+    last_full_index_scan = time.monotonic()
     clock = pygame.time.Clock()
     running = True
     usb_connected = connected
@@ -1256,11 +1906,19 @@ def main():
     pir_low_since = time.monotonic()
     pir_ready_for_new_event = False
     pir_start_time = time.monotonic()
-    pir_low_stable_seconds = float(CONFIG.get("pir_low_stable_seconds", 2.0))
+    pir_low_stable_seconds = float(CONFIG.get("pir_low_stable_seconds", 3.0))
     pir_startup_ignore_seconds = float(CONFIG.get("pir_startup_ignore_seconds", 30))
+    pir_high_confirm_seconds = float(CONFIG.get("pir_high_confirm_seconds", 0.75))
+    pir_high_since = None
     last_pir_debug = 0.0
     print(f"Inactivity timeout: {inactivity_timeout:.0f} seconds")
     print("PIR timer uses MOTION EVENTS (LOW->HIGH), not continuous HIGH level.")
+
+    startup_health_check(connected, pir, upload_overlay, photos)
+    if connected:
+        start_background_sync()
+    else:
+        start_index_hash_worker()
 
     while running:
         now = time.monotonic()
@@ -1276,28 +1934,42 @@ def main():
                 print(f"PIR read error: {exc}")
 
         if not pir_active:
+            pir_high_since = None
             if last_pir_state:
                 pir_low_since = now
             if (now - pir_low_since) >= pir_low_stable_seconds:
                 pir_ready_for_new_event = True
+        else:
+            if not last_pir_state:
+                pir_high_since = now
 
         motion_event = (
             pir_active
-            and not last_pir_state
+            and pir_high_since is not None
             and pir_ready_for_new_event
+            and (now - pir_high_since) >= pir_high_confirm_seconds
             and (now - pir_start_time) >= pir_startup_ignore_seconds
         )
 
         if motion_event:
             pir_ready_for_new_event = False
+            pir_high_since = None
             last_person_activity = now
-            print("PIR EVENT: qualified new motion")
+            print(
+                f"PIR EVENT: qualified motion "
+                f"(HIGH >= {pir_high_confirm_seconds:.2f}s)"
+            )
 
             if not display_awake:
                 print("PIR wake: turning display ON")
                 set_display_power(True)
+                time.sleep(float(CONFIG.get('display_power_wake_delay_seconds', 0.40)))
                 display_awake = True
                 try:
+                    screen = pygame.display.set_mode(
+                        (physical_w, physical_h),
+                        pygame.FULLSCREEN | pygame.DOUBLEBUF
+                    )
                     if current_surface is not None:
                         frame_canvas.blit(current_surface, (0, 0))
                     else:
@@ -1328,22 +2000,19 @@ def main():
             and inactivity_timeout > 0
             and (now - last_person_activity) >= inactivity_timeout
         ):
-            print(f"Inactivity timeout reached ({inactivity_timeout:.0f}s): blanking display")
+            print(f"Inactivity timeout reached ({inactivity_timeout:.0f}s): powering display OFF")
 
-            # Guaranteed application-level blanking first. Even if the desktop's
-            # display-power command is unavailable, the user sees a black screen.
+            # First remove all visible content (including QR), then request
+            # actual display/HDMI power-off. Black screen remains the fallback.
             try:
-                frame_canvas.fill((0, 0, 0))
-                present_frame(
-                    screen, frame_canvas, physical_w, physical_h, rotation,
-                    upload_overlay=upload_overlay,
-                    media_rotation=0,
-                )
+                screen.fill((0, 0, 0))
+                pygame.display.flip()
             except Exception as exc:
                 print(f"Black-screen blanking failed: {exc}")
 
-            # Keep HDMI active; this is a black-screen sleep only.
-            set_display_power(False)
+            power_off_ok = set_display_power(False)
+            if not power_off_ok:
+                print('Display sleep fallback: HDMI signal could not be powered off.')
             display_awake = False
 
         # Keep services alive while visually asleep; do not advance slideshow.
@@ -1363,9 +2032,15 @@ def main():
 
             if wake_requested and running:
                 print("Keyboard/mouse wake: restoring slideshow")
+                set_display_power(True)
+                time.sleep(float(CONFIG.get('display_power_wake_delay_seconds', 0.40)))
                 display_awake = True
                 last_person_activity = time.monotonic()
                 try:
+                    screen = pygame.display.set_mode(
+                        (physical_w, physical_h),
+                        pygame.FULLSCREEN | pygame.DOUBLEBUF
+                    )
                     if current_surface is not None:
                         frame_canvas.blit(current_surface, (0, 0))
                     else:
@@ -1463,7 +2138,7 @@ def main():
                 elif event.key == pygame.K_r:
                     print('Rescanning USB media directory...')
                     refresh_usb_paths()
-                    photos = find_photos()
+                    photos = find_photos(force_rebuild=True, reset_readability=True)
                     index = 0
                     current_surface = None
                     current_path = None
@@ -1501,6 +2176,19 @@ def main():
             print('Automatic Google Drive sync requested...')
             if start_background_sync():
                 last_sync = time.monotonic()
+
+        # Infrequent full scan catches photos copied manually onto the USB while
+        # avoiding the expensive recursive scan every slideshow loop.
+        if (
+            usb_connected
+            and not sync_in_progress
+            and full_index_scan_interval > 0
+            and (now - last_full_index_scan) >= full_index_scan_interval
+        ):
+            last_full_index_scan = now
+            photos = find_photos(force_rebuild=True)
+            index = min(index, max(0, len(photos) - 1))
+            start_index_hash_worker()
 
         # Progressive media discovery:
         # While Drive sync is still downloading, rescan the USB directory so
@@ -1641,17 +2329,38 @@ def main():
                         frame_cache_limit,
                     )
                     current_path = candidate
+                    mark_media_readable(candidate)
                     loaded = True
                     break
 
-                except FileNotFoundError:
-                    print('ERROR: VLC is not installed. Run: sudo apt install -y vlc')
-                    index = (index + 1) % len(photos)
+                except FileNotFoundError as exc:
+                    if is_video(candidate):
+                        print('ERROR: VLC is not installed or video file disappeared. Run: sudo apt install -y vlc')
+                        index = (index + 1) % len(photos)
+                    else:
+                        mark_media_unreadable(candidate, exc)
+                        photos = [p for p in photos if p != candidate]
+                        if not photos:
+                            current_surface = None
+                            current_path = None
+                            loaded = False
+                            break
+                        index %= len(photos)
                     attempts += 1
 
                 except Exception as exc:
-                    print(f'Failed to load/play {candidate}: {exc}')
-                    index = (index + 1) % len(photos)
+                    if not is_video(candidate):
+                        mark_media_unreadable(candidate, exc)
+                        photos = [p for p in photos if p != candidate]
+                        if not photos:
+                            current_surface = None
+                            current_path = None
+                            loaded = False
+                            break
+                        index %= len(photos)
+                    else:
+                        print(f'Failed to load/play {candidate}: {exc}')
+                        index = (index + 1) % len(photos)
                     attempts += 1
 
             if loaded:
@@ -1677,6 +2386,9 @@ def main():
 
         clock.tick(60)
 
+    if not display_awake:
+        set_display_power(True)
+        time.sleep(0.25)
     pygame.quit()
     print('Photo frame stopped.')
 
