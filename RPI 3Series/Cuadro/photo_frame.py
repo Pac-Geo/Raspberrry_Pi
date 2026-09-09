@@ -86,11 +86,7 @@ DEFAULT_CONFIG = {
     'sync_interval_seconds': 900,
     'usb_recheck_seconds': 2,
     'media_ordering': 'folder_then_name',
-    'apps_script_url': (
-        'https://script.google.com/macros/s/'
-        'AKfycbzke5eN-5VNLriVYGjG8mH4-dEWb1km7iGoxhgm262S62JwzOVulGjC9ajhb3DQ8ZdRJA/'
-        'exec'
-    ),
+    'apps_script_url': 'https://script.google.com/macros/s/AKfycbySgtGdqgBXB2F6IpvvGTGY4itR5cDGmQOC0jrqwZ5SGknjqWNq2ZWIg0FMMi7ZvnOAUg/exec',
     'apps_script_token': 'facildeconectar',
     'download_chunk_size': 1024 * 1024,
     'max_photo_size_mb': 250,
@@ -278,18 +274,24 @@ sync_completed_generation = 0
 IMAGE_EXTENSIONS = {
     '.jpg', '.jpeg', '.jpe', '.jfif',
     '.png',
-    '.bmp', '.dib',
+    '.heic', '.heif',
+    '.avif',
     '.webp',
     '.gif',
     '.tif', '.tiff',
-    '.heic', '.heif',
-    '.avif',
-    '.ico',
+    '.bmp', '.dib',
+    '.ico', '.cur', '.icns',
     '.ppm', '.pgm', '.pbm', '.pnm',
     '.pcx',
     '.tga',
     '.dds',
     '.eps',
+    '.psd',
+    '.sgi', '.rgb', '.rgba', '.bw',
+    '.xbm', '.xpm',
+    '.msp',
+    '.blp',
+    '.qoi',
 }
 VIDEO_EXTENSIONS = {'.mp4', '.m4v', '.mov', '.avi', '.mkv', '.mpeg', '.mpg', '.webm', '.mts', '.m2ts', '.3gp', '.wmv', '.mvre'}
 SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
@@ -330,12 +332,17 @@ def is_supported_drive_media(photo):
     mime = str(photo.get('mimeType', '')).lower()
     name = str(photo.get('name', ''))
 
-    if mime in DRIVE_MIME_TYPES:
+    # Extension-first acceptance handles HEIC/HEIF even if Drive reports
+    # application/octet-stream or another generic MIME type.
+    if is_supported_image_name(name):
         return True
 
-    # Accept any image/* type when the filename extension is one we know how
-    # to decode locally. This makes the Drive side tolerant of MIME variations.
-    if mime.startswith('image/') and is_supported_image_name(name):
+    # Accept any proper image MIME type returned by Drive.
+    if mime.startswith('image/'):
+        return True
+
+    # Keep existing explicitly supported MIME types too.
+    if mime in DRIVE_MIME_TYPES:
         return True
 
     return False
@@ -428,7 +435,10 @@ def request_json(params, retries=DOWNLOAD_RETRIES):
             response.raise_for_status()
             payload = response.json()
             if not payload.get('success', False):
-                raise RuntimeError(f'Apps Script returned error: {payload}')
+                error = payload.get('error', 'unknown Apps Script error')
+                message = payload.get('message', '')
+                details = f"{error}" + (f": {message}" if message else "")
+                raise RuntimeError(details)
             return payload
         except Exception as exc:
             last_error = exc
@@ -453,27 +463,44 @@ def fetch_drive_photo_list():
         except (KeyError, TypeError, ValueError):
             print(f'Skipping malformed Drive entry: {item}')
     print(f'Drive media returned by Apps Script: {len(photos)}')
-    heic_count = sum(
-        1 for item in photos
-        if Path(item['name']).suffix.lower() in {'.heic', '.heif'}
-    )
-    print(f'Drive HEIC/HEIF entries returned: {heic_count}')
-    if len(photos) > 0 and heic_count == 0:
+
+    heic_count = 0
+    image_count = 0
+
+    for item in photos:
+        suffix = Path(item['name']).suffix.lower()
+        mime = str(item['mimeType']).lower()
+
+        if suffix in IMAGE_EXTENSIONS or mime.startswith('image/'):
+            image_count += 1
+
+        if suffix in {'.heic', '.heif'} or mime in {'image/heic', 'image/heif'}:
+            heic_count += 1
+
         print(
-            'NOTE: If HEIC files exist in the Drive folder but this count is 0, '
-            'the Apps Script list endpoint is filtering them BEFORE the Pi sees them.'
+            f"  DRIVE ITEM: {item['name']} | "
+            f"MIME={item['mimeType']} | SIZE={item['size']}"
         )
+
+    print(f'Drive image entries returned: {image_count}')
+    print(f'Drive HEIC/HEIF entries returned: {heic_count}')
     return photos
 
 
 def fetch_drive_chunk(photo, offset, requested_length):
-    payload = request_json({
+    try:
+        payload = request_json({
         'action': 'chunk',
         'id': photo['id'],
         'offset': offset,
         'length': requested_length,
         'token': APPS_SCRIPT_TOKEN,
-    })
+        })
+    except Exception as exc:
+        raise RuntimeError(
+            f"chunk download failed for {photo['name']} at byte {offset}: {exc}"
+        ) from exc
+
     returned_offset = int(payload['offset'])
     raw_length = int(payload['length'])
     if returned_offset != offset:
@@ -1147,6 +1174,7 @@ def get_cached_photo_frame(
 def main():
     print('\n========================')
     print('RASPBERRY PI PHOTO FRAME')
+    print('HEIC decoder: pillow-heif READY' if pillow_heif is not None else 'HEIC decoder: NOT AVAILABLE')
     print('========================')
     connected = refresh_usb_paths()
     print(f'USB drive: {USB_ROOT if USB_ROOT else "DISCONNECTED"}')

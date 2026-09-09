@@ -6,7 +6,7 @@
   "sync_interval_seconds": 900,
   "usb_recheck_seconds": 2,
   "media_ordering": "folder_then_name",
-  "apps_script_url": "https://script.google.com/macros/s/AKfycbzke5eN-5VNLriVYGjG8mH4-dEWb1km7iGoxhgm262S62JwzOVulGjC9ajhb3DQ8ZdRJA/exec",
+  "apps_script_url": "https://script.google.com/macros/s/AKfycbySgtGdqgBXB2F6IpvvGTGY4itR5cDGmQOC0jrqwZ5SGknjqWNq2ZWIg0FMMi7ZvnOAUg/exec",
   "apps_script_token": "facildeconectar",
   "download_chunk_size": 1048576,
   "max_photo_size_mb": 250,

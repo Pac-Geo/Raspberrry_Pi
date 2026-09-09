@@ -622,3 +622,40 @@ This release changes ONLY the QR behavior.
 
 This fixes the previous version where present_frame() received the QR arguments
 but never actually drew the overlay.
+
+
+V6.3 ALL-IMAGE SUPPORT + CURRENT DEPLOYMENT
+-------------------------------------------
+This version leaves QR placement, QR size, rotation behavior, slideshow timing,
+sleep/wake, and all other visual behavior from V6.2 unchanged.
+
+Current Apps Script deployment embedded:
+  https://script.google.com/macros/s/AKfycbySgtGdqgBXB2F6IpvvGTGY4itR5cDGmQOC0jrqwZ5SGknjqWNq2ZWIg0FMMi7ZvnOAUg/exec
+
+The Pi now accepts supported images by filename extension even when Google Drive
+reports a generic MIME type. It also accepts every image/* MIME returned by the
+Apps Script.
+
+HEIC/HEIF originals:
+  - downloaded byte-for-byte
+  - never converted or recompressed on disk
+  - decoded only in RAM for display using pillow-heif/libheif
+
+The terminal now prints every Drive item returned, including filename, MIME type,
+size, total image count, and HEIC/HEIF count.
+
+
+V6.4 DOWNLOAD-STAGE FIX
+-----------------------
+The Apps Script can now list HEIC/HEIF correctly, but the previous chunk
+transport still depended on Google Drive HTTP Range responses. Some binary
+formats can list correctly and then fail during chunk download.
+
+The accompanying Apps Script fixes that by:
+  - reading the original Drive file bytes directly
+  - slicing the requested chunk in Apps Script
+  - returning the exact original bytes without conversion/recompression
+  - using 1 MiB chunks to match the Pi
+
+QR size, QR rotation, slideshow rendering, photo FIT behavior, and all other
+visual behavior are unchanged from the working V6.2/V6.3 lineage.

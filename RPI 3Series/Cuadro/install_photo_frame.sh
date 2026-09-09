@@ -72,3 +72,15 @@ try:
 except Exception as exc:
     print('HEIC/HEIF decoder: FAILED ->', exc)
 PYTEST
+
+
+# HEIC functional decoder test
+python3 - <<'PYTEST'
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+    print("HEIC functional decoder test: READY")
+except Exception as exc:
+    print("HEIC functional decoder test: FAILED ->", exc)
+    raise SystemExit(1)
+PYTEST
