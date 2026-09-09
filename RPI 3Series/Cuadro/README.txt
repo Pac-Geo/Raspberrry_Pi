@@ -446,3 +446,57 @@ Safety:
 
 Config:
   "progressive_media_scan_seconds": 1.0
+
+
+V5.5 20-SECOND PLAYBACK + ROTATION KEYS
+---------------------------------------
+Slideshow timing:
+  Each photo is displayed for 20 seconds.
+
+Keyboard:
+  Right Arrow -> next media item
+  Left Arrow  -> previous media item
+  Up Arrow    -> rotate current photo 90 degrees CLOCKWISE
+  Down Arrow  -> rotate current photo 90 degrees COUNTERCLOCKWISE
+  Q / Esc     -> quit
+
+Photo rotation:
+  - happens immediately
+  - rotates in 90-degree steps
+  - preserves the FIT behavior after rotation
+  - is remembered for that photo for the current running session
+  - resets when the photo-frame program is restarted
+
+Video:
+  Up/Down are now reserved as the same clockwise/counterclockwise controls for
+  video media. The existing video playback code is not modified in this release;
+  the key mapping is ready to be connected when video work resumes.
+
+
+V5.6 FASTER CONTROLS + QR POSITION FIX
+--------------------------------------
+Responsiveness:
+  - Normal event loop increased from 30 FPS to 60 FPS.
+  - Empty/waiting screen polling increased from 5 FPS to 30 FPS.
+  - Up to 6 rendered photo/orientation frames are cached in RAM.
+  - Returning to a recently shown photo or a recently used rotation should
+    therefore be nearly immediate.
+
+Important:
+  The first time a very large photo is decoded/rendered can still take some
+  time on a Raspberry Pi 3B+, because the full image, blurred background, FIT
+  scaling, and rotation must be generated. Repeated access uses the RAM cache.
+
+QR overlay:
+  - QR is no longer drawn onto the logical slideshow canvas before portrait
+    rotation.
+  - It is now drawn AFTER final display rotation.
+  - This keeps it upright and anchored to the viewer's bottom-right corner,
+    including after Up/Down photo rotation.
+
+Controls remain:
+  Right Arrow -> next
+  Left Arrow  -> previous
+  Up Arrow    -> rotate photo clockwise
+  Down Arrow  -> rotate photo counterclockwise
+  Q / Esc     -> quit

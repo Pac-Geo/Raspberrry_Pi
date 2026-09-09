@@ -75,7 +75,7 @@ DEFAULT_CONFIG = {
     'usb_label': 'CUADRO',
     'usb_media_base': '/media/pacgeo',
     'photo_folder': 'PHOTOS',
-    'slide_seconds': 10,
+    'slide_seconds': 20,
     'sync_interval_seconds': 900,
     'usb_recheck_seconds': 2,
     'media_ordering': 'folder_then_name',
@@ -718,9 +718,15 @@ def play_video(path):
     return False
 
 
-def make_frame(path, screen_w, screen_h):
+def make_frame(path, screen_w, screen_h, manual_rotation=0):
     with Image.open(path) as src:
         image = ImageOps.exif_transpose(src).convert('RGB')
+
+        # Manual photo rotation requested from the keyboard.
+        # PIL positive angles rotate counterclockwise.
+        manual_rotation = int(manual_rotation) % 360
+        if manual_rotation:
+            image = image.rotate(manual_rotation, expand=True)
 
         background = image.copy()
         cover_scale = max(screen_w / background.width, screen_h / background.height)
@@ -826,8 +832,20 @@ def setup_pir():
 
 
 
-def present_frame(screen, frame_surface, physical_w, physical_h, rotation):
-    """Rotate the logical slideshow surface to match the physical display."""
+def present_frame(
+    screen,
+    frame_surface,
+    physical_w,
+    physical_h,
+    rotation,
+    upload_overlay=None,
+):
+    """
+    Rotate the slideshow image to match the physical portrait display.
+
+    The QR overlay is drawn AFTER the display rotation, so it always remains
+    upright and anchored to the viewer's bottom-right corner.
+    """
     if rotation == 90:
         output = pygame.transform.rotate(frame_surface, -90)
     elif rotation == 180:
@@ -842,6 +860,15 @@ def present_frame(screen, frame_surface, physical_w, physical_h, rotation):
         output = pygame.transform.smoothscale(output, (physical_w, physical_h))
 
     screen.blit(output, (0, 0))
+
+    if upload_overlay is not None:
+        draw_upload_overlay(
+            screen,
+            upload_overlay,
+            physical_w,
+            physical_h,
+        )
+
     pygame.display.flip()
 
 
@@ -912,6 +939,8 @@ def draw_upload_overlay(target_surface, overlay_surface, screen_w, screen_h):
 # photo playback now and video playback later.
 NAV_NEXT_KEYS = {pygame.K_RIGHT}
 NAV_PREVIOUS_KEYS = {pygame.K_LEFT}
+ROTATE_CLOCKWISE_KEYS = {pygame.K_UP}
+ROTATE_COUNTERCLOCKWISE_KEYS = {pygame.K_DOWN}
 
 
 def is_next_key(key):
@@ -920,6 +949,58 @@ def is_next_key(key):
 
 def is_previous_key(key):
     return key in NAV_PREVIOUS_KEYS
+
+
+def is_rotate_clockwise_key(key):
+    return key in ROTATE_CLOCKWISE_KEYS
+
+
+def is_rotate_counterclockwise_key(key):
+    return key in ROTATE_COUNTERCLOCKWISE_KEYS
+
+
+
+def get_cached_photo_frame(
+    path,
+    screen_w,
+    screen_h,
+    manual_rotation,
+    cache,
+    cache_order,
+    cache_limit,
+):
+    """Return a rendered photo surface from RAM when available."""
+    try:
+        stat = path.stat()
+        key = (
+            str(path),
+            stat.st_size,
+            stat.st_mtime_ns,
+            int(manual_rotation) % 360,
+            screen_w,
+            screen_h,
+        )
+    except OSError:
+        key = (str(path), int(manual_rotation) % 360, screen_w, screen_h)
+
+    cached = cache.get(key)
+    if cached is not None:
+        try:
+            cache_order.remove(key)
+        except ValueError:
+            pass
+        cache_order.append(key)
+        return cached
+
+    surface = make_frame(path, screen_w, screen_h, manual_rotation)
+    cache[key] = surface
+    cache_order.append(key)
+
+    while len(cache_order) > cache_limit:
+        old_key = cache_order.pop(0)
+        cache.pop(old_key, None)
+
+    return surface
 
 
 def main():
@@ -969,6 +1050,19 @@ def main():
     index = 0
     current_surface = None
     current_path = None
+
+    # Manual orientation corrections are remembered per media file for the
+    # current program session. Values use PIL convention:
+    #   +90 = counterclockwise, -90/270 = clockwise.
+    media_rotation = {}
+
+    # Keep a few already-rendered photo frames in RAM. This makes Left/Right
+    # and repeated rotation commands respond much faster without storing a
+    # huge cache on the Pi.
+    frame_cache = {}
+    frame_cache_order = []
+    frame_cache_limit = int(CONFIG.get("photo_frame_cache_items", 6))
+
     last_slide_change = 0.0
     last_sync = time.monotonic()
     last_media_scan = 0.0
@@ -1033,13 +1127,11 @@ def main():
                 try:
                     if current_surface is not None:
                         frame_canvas.blit(current_surface, (0, 0))
-                        draw_upload_overlay(
-                            frame_canvas, upload_overlay, screen_w, screen_h
-                        )
                     else:
                         frame_canvas.fill((0, 0, 0))
                     present_frame(
-                        screen, frame_canvas, physical_w, physical_h, rotation
+                        screen, frame_canvas, physical_w, physical_h, rotation,
+                        upload_overlay=upload_overlay
                     )
                 except Exception as exc:
                     print(f"Wake redraw failed: {exc}")
@@ -1069,7 +1161,8 @@ def main():
             try:
                 frame_canvas.fill((0, 0, 0))
                 present_frame(
-                    screen, frame_canvas, physical_w, physical_h, rotation
+                    screen, frame_canvas, physical_w, physical_h, rotation,
+                    upload_overlay=upload_overlay
                 )
             except Exception as exc:
                 print(f"Black-screen blanking failed: {exc}")
@@ -1100,13 +1193,11 @@ def main():
                 try:
                     if current_surface is not None:
                         frame_canvas.blit(current_surface, (0, 0))
-                        draw_upload_overlay(
-                            frame_canvas, upload_overlay, screen_w, screen_h
-                        )
                     else:
                         frame_canvas.fill((0, 0, 0))
                     present_frame(
-                        screen, frame_canvas, physical_w, physical_h, rotation
+                        screen, frame_canvas, physical_w, physical_h, rotation,
+                        upload_overlay=upload_overlay
                     )
                 except Exception as exc:
                     print(f"Wake redraw failed: {exc}")
@@ -1128,6 +1219,54 @@ def main():
                 elif is_previous_key(event.key) and photos:
                     index = (index - 1) % len(photos)
                     force_reload = True
+                elif is_rotate_clockwise_key(event.key) and current_path is not None:
+                    if not is_video(current_path):
+                        # Clockwise = -90 degrees in PIL convention.
+                        rotation_value = (media_rotation.get(current_path, 0) - 90) % 360
+                        media_rotation[current_path] = rotation_value
+                        current_surface = get_cached_photo_frame(
+                            current_path,
+                            screen_w,
+                            screen_h,
+                            rotation_value,
+                            frame_cache,
+                            frame_cache_order,
+                            frame_cache_limit,
+                        )
+                        last_slide_change = time.monotonic()
+                        print(
+                            f'Rotated clockwise: {current_path.name} '
+                            f'({rotation_value} deg internal)'
+                        )
+                    else:
+                        print(
+                            'Up Arrow rotation is reserved for video playback '
+                            'when video controls are resumed.'
+                        )
+                elif is_rotate_counterclockwise_key(event.key) and current_path is not None:
+                    if not is_video(current_path):
+                        # Counterclockwise = +90 degrees in PIL convention.
+                        rotation_value = (media_rotation.get(current_path, 0) + 90) % 360
+                        media_rotation[current_path] = rotation_value
+                        current_surface = get_cached_photo_frame(
+                            current_path,
+                            screen_w,
+                            screen_h,
+                            rotation_value,
+                            frame_cache,
+                            frame_cache_order,
+                            frame_cache_limit,
+                        )
+                        last_slide_change = time.monotonic()
+                        print(
+                            f'Rotated counterclockwise: {current_path.name} '
+                            f'({rotation_value} deg internal)'
+                        )
+                    else:
+                        print(
+                            'Down Arrow rotation is reserved for video playback '
+                            'when video controls are resumed.'
+                        )
                 elif event.key == pygame.K_r:
                     print('Rescanning USB media directory...')
                     refresh_usb_paths()
@@ -1248,7 +1387,7 @@ def main():
                     'R = rescan USB',
                     'Esc / Q = exit',
                 ])
-            clock.tick(5)
+            clock.tick(30)
             continue
 
         if current_surface is None or force_reload or (now - last_slide_change >= SLIDE_SECONDS):
@@ -1299,7 +1438,15 @@ def main():
                         loaded = True
                         break
 
-                    current_surface = make_frame(candidate, screen_w, screen_h)
+                    current_surface = get_cached_photo_frame(
+                        candidate,
+                        screen_w,
+                        screen_h,
+                        media_rotation.get(candidate, 0),
+                        frame_cache,
+                        frame_cache_order,
+                        frame_cache_limit,
+                    )
                     current_path = candidate
                     loaded = True
                     break
@@ -1329,14 +1476,12 @@ def main():
 
         if current_surface is not None:
             frame_canvas.blit(current_surface, (0, 0))
-            draw_upload_overlay(
-                frame_canvas, upload_overlay, screen_w, screen_h
-            )
             present_frame(
-                screen, frame_canvas, physical_w, physical_h, rotation
+                screen, frame_canvas, physical_w, physical_h, rotation,
+                upload_overlay=upload_overlay
             )
 
-        clock.tick(30)
+        clock.tick(60)
 
     pygame.quit()
     print('Photo frame stopped.')
