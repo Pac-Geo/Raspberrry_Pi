@@ -118,6 +118,26 @@ def load_config():
 
 CONFIG = load_config()
 
+
+def save_config_value(key, value):
+    try:
+        data = {}
+        if CONFIG_PATH.exists():
+            with CONFIG_PATH.open('r', encoding='utf-8') as handle:
+                data = json.load(handle)
+        data[key] = value
+        temp_path = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + '.tmp')
+        with temp_path.open('w', encoding='utf-8') as handle:
+            json.dump(data, handle, indent=2)
+            handle.write('\\n')
+        os.replace(temp_path, CONFIG_PATH)
+        CONFIG[key] = value
+        return True
+    except Exception as exc:
+        print(f'WARNING: could not save {key}={value}: {exc}')
+        return False
+
+
 USB_LABEL = str(CONFIG['usb_label'])
 USB_MEDIA_BASE = Path(CONFIG['usb_media_base'])
 PHOTO_FOLDER_NAME = str(CONFIG['photo_folder'])
@@ -822,34 +842,14 @@ def play_video(path):
 
 def open_image_high_quality(path):
     """
-    Open an image for DISPLAY without changing the original file.
+    Open every still-image format through the same Pillow path.
 
-    HEIC/HEIF/AVIF are decoded with pillow-heif when available. The returned
-    Pillow image is an in-memory working copy only; no conversion is written
-    back to USB.
+    pillow-heif is registered above, so HEIC/HEIF/AVIF go through Image.open()
+    just like JPEG/PNG/WebP/TIFF/etc. This keeps EXIF/orientation handling
+    consistent across all image types.
+
+    The original source file is never modified or recompressed.
     """
-    suffix = path.suffix.lower()
-
-    if suffix in {'.heic', '.heif', '.avif'} and pillow_heif is not None:
-        try:
-            heif = pillow_heif.read_heif(str(path), convert_hdr_to_8bit=False)
-            image = Image.frombytes(
-                heif.mode,
-                heif.size,
-                heif.data,
-                'raw',
-                heif.mode,
-                heif.stride,
-            )
-            # Carry metadata that Pillow can use for orientation/color handling.
-            if getattr(heif, 'info', None):
-                image.info.update(heif.info)
-            return image
-        except Exception as exc:
-            print(f'HEIF direct decode fallback for {path.name}: {exc}')
-
-    # Registered Pillow opener handles JPEG/PNG/WebP/TIFF/etc., and also HEIF
-    # when pillow-heif registration succeeded. Copy detaches from file handle.
     with Image.open(path) as src:
         try:
             src.seek(0)
@@ -1171,6 +1171,13 @@ def get_cached_photo_frame(
     return surface
 
 
+def logical_size_for_rotation(physical_w, physical_h, rotation):
+    rotation = int(rotation) % 360
+    if rotation in (90, 270):
+        return physical_h, physical_w
+    return physical_w, physical_h
+
+
 def main():
     print('\n========================')
     print('RASPBERRY PI PHOTO FRAME')
@@ -1192,10 +1199,11 @@ def main():
     physical_w, physical_h = info.current_w, info.current_h
     rotation = int(CONFIG.get("display_rotation_degrees", 270)) % 360
 
-    if rotation in (90, 270):
-        screen_w, screen_h = physical_h, physical_w
-    else:
-        screen_w, screen_h = physical_w, physical_h
+    screen_w, screen_h = logical_size_for_rotation(
+        physical_w,
+        physical_h,
+        rotation,
+    )
 
     print(
         f'Detected display: {physical_w}x{physical_h} | '
@@ -1220,10 +1228,6 @@ def main():
     current_surface = None
     current_path = None
 
-    # Manual orientation corrections are remembered per media file for the
-    # current program session. Values use PIL convention:
-    #   +90 = counterclockwise, -90/270 = clockwise.
-    media_rotation = {}
 
     # Keep a few already-rendered photo frames in RAM. This makes Left/Right
     # and repeated rotation commands respond much faster without storing a
@@ -1301,7 +1305,7 @@ def main():
                     present_frame(
                         screen, frame_canvas, physical_w, physical_h, rotation,
                         upload_overlay=upload_overlay,
-                        media_rotation=(media_rotation.get(current_path, 0) if current_path else 0),
+                        media_rotation=0,
                     )
                 except Exception as exc:
                     print(f"Wake redraw failed: {exc}")
@@ -1333,7 +1337,7 @@ def main():
                 present_frame(
                     screen, frame_canvas, physical_w, physical_h, rotation,
                     upload_overlay=upload_overlay,
-                    media_rotation=(media_rotation.get(current_path, 0) if current_path else 0),
+                    media_rotation=0,
                 )
             except Exception as exc:
                 print(f"Black-screen blanking failed: {exc}")
@@ -1369,7 +1373,7 @@ def main():
                     present_frame(
                         screen, frame_canvas, physical_w, physical_h, rotation,
                         upload_overlay=upload_overlay,
-                        media_rotation=(media_rotation.get(current_path, 0) if current_path else 0),
+                        media_rotation=0,
                     )
                 except Exception as exc:
                     print(f"Wake redraw failed: {exc}")
@@ -1391,54 +1395,71 @@ def main():
                 elif is_previous_key(event.key) and photos:
                     index = (index - 1) % len(photos)
                     force_reload = True
-                elif is_rotate_clockwise_key(event.key) and current_path is not None:
-                    if not is_video(current_path):
-                        # Clockwise = -90 degrees in PIL convention.
-                        rotation_value = (media_rotation.get(current_path, 0) - 90) % 360
-                        media_rotation[current_path] = rotation_value
+                elif is_rotate_clockwise_key(event.key):
+                    # ONE GLOBAL ROTATION for the entire frame:
+                    # photo + blurred background + QR all rotate together.
+                    rotation = (rotation + 90) % 360
+                    save_config_value('display_rotation_degrees', rotation)
+
+                    screen_w, screen_h = logical_size_for_rotation(
+                        physical_w,
+                        physical_h,
+                        rotation,
+                    )
+                    frame_canvas = pygame.Surface((screen_w, screen_h))
+
+                    # Render-cache dimensions are now different, so reset it.
+                    frame_cache.clear()
+                    frame_cache_order.clear()
+
+                    if current_path is not None and not is_video(current_path):
                         current_surface = get_cached_photo_frame(
                             current_path,
                             screen_w,
                             screen_h,
-                            rotation_value,
+                            0,
                             frame_cache,
                             frame_cache_order,
                             frame_cache_limit,
                         )
-                        last_slide_change = time.monotonic()
-                        print(
-                            f'Rotated clockwise: {current_path.name} '
-                            f'({rotation_value} deg internal)'
-                        )
-                    else:
-                        print(
-                            'Up Arrow rotation is reserved for video playback '
-                            'when video controls are resumed.'
-                        )
-                elif is_rotate_counterclockwise_key(event.key) and current_path is not None:
-                    if not is_video(current_path):
-                        # Counterclockwise = +90 degrees in PIL convention.
-                        rotation_value = (media_rotation.get(current_path, 0) + 90) % 360
-                        media_rotation[current_path] = rotation_value
+
+                    last_slide_change = time.monotonic()
+                    print(
+                        f'GLOBAL frame rotation clockwise -> {rotation} degrees'
+                    )
+
+                elif is_rotate_counterclockwise_key(event.key):
+                    # ONE GLOBAL ROTATION for the entire frame:
+                    # photo + blurred background + QR all rotate together.
+                    rotation = (rotation - 90) % 360
+                    save_config_value('display_rotation_degrees', rotation)
+
+                    screen_w, screen_h = logical_size_for_rotation(
+                        physical_w,
+                        physical_h,
+                        rotation,
+                    )
+                    frame_canvas = pygame.Surface((screen_w, screen_h))
+
+                    frame_cache.clear()
+                    frame_cache_order.clear()
+
+                    if current_path is not None and not is_video(current_path):
                         current_surface = get_cached_photo_frame(
                             current_path,
                             screen_w,
                             screen_h,
-                            rotation_value,
+                            0,
                             frame_cache,
                             frame_cache_order,
                             frame_cache_limit,
                         )
-                        last_slide_change = time.monotonic()
-                        print(
-                            f'Rotated counterclockwise: {current_path.name} '
-                            f'({rotation_value} deg internal)'
-                        )
-                    else:
-                        print(
-                            'Down Arrow rotation is reserved for video playback '
-                            'when video controls are resumed.'
-                        )
+
+                    last_slide_change = time.monotonic()
+                    print(
+                        f'GLOBAL frame rotation counterclockwise -> {rotation} degrees'
+                    )
+
                 elif event.key == pygame.K_r:
                     print('Rescanning USB media directory...')
                     refresh_usb_paths()
@@ -1614,7 +1635,7 @@ def main():
                         candidate,
                         screen_w,
                         screen_h,
-                        media_rotation.get(candidate, 0),
+                        0,
                         frame_cache,
                         frame_cache_order,
                         frame_cache_limit,
@@ -1651,7 +1672,7 @@ def main():
             present_frame(
                 screen, frame_canvas, physical_w, physical_h, rotation,
                 upload_overlay=upload_overlay,
-                media_rotation=(media_rotation.get(current_path, 0) if current_path else 0),
+                media_rotation=0,
             )
 
         clock.tick(60)

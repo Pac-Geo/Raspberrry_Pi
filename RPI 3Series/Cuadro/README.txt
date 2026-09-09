@@ -659,3 +659,40 @@ The accompanying Apps Script fixes that by:
 
 QR size, QR rotation, slideshow rendering, photo FIT behavior, and all other
 visual behavior are unchanged from the working V6.2/V6.3 lineage.
+
+
+V6.5 UNIVERSAL PHOTO + QR ROTATION
+----------------------------------
+Up/Down now rotate the entire slideshow content universally, not one photo at a time.
+The same rotation applies to every existing and newly downloaded image and to the QR.
+The setting is saved as "universal_media_rotation_degrees" and survives restart.
+"display_rotation_degrees": 270 remains the separate physical wall-mount rotation.
+All other V6.4 behavior is unchanged.
+
+
+V6.6 SINGLE ROTATION SYSTEM
+---------------------------
+Rotation has been simplified to ONE setting only:
+
+  "display_rotation_degrees"
+
+There is no separate per-image rotation and no separate universal-media
+rotation anymore.
+
+Up / Down:
+  - rotate the ENTIRE completed frame
+  - every photo rotates the same way
+  - HEIC/JPEG/PNG/etc. all use the same orientation
+  - blurred background rotates with the photo
+  - QR rotates with the photo
+  - the setting is saved and survives restart
+  - newly downloaded photos automatically use the same setting
+
+HEIC ORIENTATION FIX:
+HEIC/HEIF/AVIF now use the same Pillow Image.open() path as JPEG/PNG/etc.
+The image is then normalized once with ImageOps.exif_transpose(). This avoids
+giving HEIC a different orientation pipeline from the older JPEG files.
+
+The original photo files are never rewritten, converted, or recompressed.
+
+All other slideshow behavior is left unchanged.
