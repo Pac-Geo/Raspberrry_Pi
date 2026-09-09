@@ -845,6 +845,65 @@ def present_frame(screen, frame_surface, physical_w, physical_h, rotation):
     pygame.display.flip()
 
 
+
+def load_upload_overlay():
+    """Load the optional QR upload overlay as a pygame surface."""
+    overlay_path = Path(__file__).resolve().parent / "upload_qr_overlay.png"
+
+    if not overlay_path.exists():
+        print(f"QR overlay not found: {overlay_path}")
+        return None
+
+    try:
+        overlay = pygame.image.load(str(overlay_path)).convert_alpha()
+        return overlay
+    except Exception as exc:
+        print(f"Could not load QR overlay: {exc}")
+        return None
+
+
+def draw_upload_overlay(target_surface, overlay_surface, screen_w, screen_h):
+    """
+    Draw the QR upload card in the bottom-right corner.
+
+    The overlay is scaled relative to the logical portrait frame so it remains
+    readable without covering too much of the photo.
+    """
+    if overlay_surface is None:
+        return
+
+    if not bool(CONFIG.get("upload_overlay_enabled", True)):
+        return
+
+    width_fraction = float(CONFIG.get("upload_overlay_width_fraction", 0.24))
+    margin = int(CONFIG.get("upload_overlay_margin_px", 30))
+    opacity = int(CONFIG.get("upload_overlay_opacity", 235))
+
+    target_w = max(120, round(screen_w * width_fraction))
+
+    src_w, src_h = overlay_surface.get_size()
+    scale = target_w / src_w
+    target_h = max(1, round(src_h * scale))
+
+    max_h = max(1, screen_h - (2 * margin))
+    if target_h > max_h:
+        scale = max_h / src_h
+        target_w = max(1, round(src_w * scale))
+        target_h = max(1, round(src_h * scale))
+
+    overlay = pygame.transform.smoothscale(
+        overlay_surface,
+        (target_w, target_h),
+    )
+
+    overlay.set_alpha(max(0, min(255, opacity)))
+
+    x = screen_w - target_w - margin
+    y = screen_h - target_h - margin
+
+    target_surface.blit(overlay, (x, y))
+
+
 def main():
     print('\n========================')
     print('RASPBERRY PI PHOTO FRAME')
@@ -885,6 +944,7 @@ def main():
     # All slideshow rendering happens on this logical canvas.  The canvas is
     # rotated 90 degrees counterclockwise onto the physical display at present time.
     frame_canvas = pygame.Surface((screen_w, screen_h))
+    upload_overlay = load_upload_overlay()
 
     photos = find_photos()
     seen_sync_generation = sync_completed_generation
@@ -953,6 +1013,9 @@ def main():
                 try:
                     if current_surface is not None:
                         frame_canvas.blit(current_surface, (0, 0))
+                        draw_upload_overlay(
+                            frame_canvas, upload_overlay, screen_w, screen_h
+                        )
                     else:
                         frame_canvas.fill((0, 0, 0))
                     present_frame(
@@ -1017,6 +1080,9 @@ def main():
                 try:
                     if current_surface is not None:
                         frame_canvas.blit(current_surface, (0, 0))
+                        draw_upload_overlay(
+                            frame_canvas, upload_overlay, screen_w, screen_h
+                        )
                     else:
                         frame_canvas.fill((0, 0, 0))
                     present_frame(
@@ -1208,6 +1274,9 @@ def main():
 
         if current_surface is not None:
             frame_canvas.blit(current_surface, (0, 0))
+            draw_upload_overlay(
+                frame_canvas, upload_overlay, screen_w, screen_h
+            )
             present_frame(
                 screen, frame_canvas, physical_w, physical_h, rotation
             )

@@ -346,3 +346,46 @@ NOTE:
   that can shut the Pi almost completely down and then wake directly from this
   PIR GPIO in the current setup. This version uses the deepest reliable
   software sleep that still allows automatic PIR wake without extra hardware.
+
+
+V5.0 QR UPLOAD OVERLAY
+----------------------
+The supplied "Subir Foto" QR graphic is now included in the slideshow.
+
+Location:
+  bottom-right corner
+
+Default size:
+  24% of the logical portrait-frame width
+
+Default margin:
+  30 pixels from the right and bottom edges
+
+Default opacity:
+  235 / 255
+
+Config settings:
+  "upload_overlay_enabled": true
+  "upload_overlay_width_fraction": 0.24
+  "upload_overlay_margin_px": 30
+  "upload_overlay_opacity": 235
+
+Original overlay dimensions:
+  1584 x 2048
+
+The overlay is rendered on top of each photo while preserving the existing
+portrait rotation, FIT scaling, PIR sleep/wake, 20-minute timeout, Q/Esc exit,
+and single-instance lock.
+
+
+V5.1 QR BASE DIRECTORY FIX
+--------------------------
+Fixed startup error:
+  NameError: BASE_DIR is not defined
+
+The QR overlay path is now resolved directly from the folder containing
+photo_frame.py:
+
+  Path(__file__).resolve().parent / "upload_qr_overlay.png"
+
+No other slideshow behavior was changed.

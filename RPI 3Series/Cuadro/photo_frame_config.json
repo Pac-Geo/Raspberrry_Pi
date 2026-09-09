@@ -27,5 +27,9 @@
   "pir_sleep_rearm_low_seconds": 5.0,
   "display_rotation_degrees": 270,
   "photo_scaling_mode": "fit",
-  "max_photo_upscale_factor": 2.0
+  "max_photo_upscale_factor": 2.0,
+  "upload_overlay_enabled": true,
+  "upload_overlay_width_fraction": 0.24,
+  "upload_overlay_margin_px": 30,
+  "upload_overlay_opacity": 235
 }
