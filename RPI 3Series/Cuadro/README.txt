@@ -400,3 +400,18 @@ Old width:
 
 New width:
   12% of the portrait frame width
+
+
+V5.3 ARROW-KEY NAVIGATION
+-------------------------
+Slideshow navigation is standardized to:
+
+  Right Arrow -> next media item
+  Left Arrow  -> previous media item
+  Q / Esc     -> quit
+
+N and P are not used for navigation.
+
+The arrow-key mapping is now centralized in photo_frame.py so the same
+Left/Right controls can be connected to video playback when video work resumes.
+No video-playback behavior was changed in this version.

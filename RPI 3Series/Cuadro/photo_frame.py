@@ -904,6 +904,24 @@ def draw_upload_overlay(target_surface, overlay_surface, screen_w, screen_h):
     target_surface.blit(overlay, (x, y))
 
 
+
+# ------------------------------------------------------------
+# SLIDESHOW NAVIGATION KEYS
+# ------------------------------------------------------------
+# These are intentionally centralized so the same controls can be reused by
+# photo playback now and video playback later.
+NAV_NEXT_KEYS = {pygame.K_RIGHT}
+NAV_PREVIOUS_KEYS = {pygame.K_LEFT}
+
+
+def is_next_key(key):
+    return key in NAV_NEXT_KEYS
+
+
+def is_previous_key(key):
+    return key in NAV_PREVIOUS_KEYS
+
+
 def main():
     print('\n========================')
     print('RASPBERRY PI PHOTO FRAME')
@@ -1102,10 +1120,10 @@ def main():
             elif event.type == pygame.KEYDOWN:
                 if event.key in (pygame.K_ESCAPE, pygame.K_q):
                     running = False
-                elif event.key == pygame.K_RIGHT and photos:
+                elif is_next_key(event.key) and photos:
                     index = (index + 1) % len(photos)
                     force_reload = True
-                elif event.key == pygame.K_LEFT and photos:
+                elif is_previous_key(event.key) and photos:
                     index = (index - 1) % len(photos)
                     force_reload = True
                 elif event.key == pygame.K_r:
