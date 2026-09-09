@@ -1,0 +1,44 @@
+IMPORTANT: WHY YOUR TERMINAL ONLY SAYS 2 DRIVE PHOTOS
+=====================================================
+
+If the Pi prints:
+
+  Drive media returned by Apps Script: 2
+  Drive HEIC/HEIF entries returned: 0
+
+while your Google Drive folder actually contains 4 HEIC files plus 2 JPG files,
+then the Raspberry Pi is NOT the part skipping the HEIC files. The Apps Script
+?action=list endpoint is returning only JPG/PNG before the Pi ever receives the list.
+
+In your existing Apps Script, find the MIME-type filter used by action=list.
+If it looks like this or similar:
+
+  mimeType === "image/jpeg" || mimeType === "image/png"
+
+change the IMAGE portion to accept every image MIME type:
+
+  mimeType.indexOf("image/") === 0
+
+If your script has both photo and video filtering, the logic should be conceptually:
+
+  const isImage = mimeType.indexOf("image/") === 0;
+  const isVideo = [
+    "video/mp4",
+    "video/quicktime",
+    "video/x-msvideo",
+    "video/x-matroska",
+    "video/mpeg",
+    "video/webm"
+  ].includes(mimeType);
+
+  if (isImage || isVideo) {
+    // include the file in the list response
+  }
+
+This includes HEIC/HEIF/AVIF/WebP/TIFF/GIF/BMP and future image MIME types
+without having to add each one manually.
+
+After changing Apps Script, SAVE it and update/redeploy the existing Web App
+deployment so the same /exec URL serves the new code.
+
+The Pi-side V6.1 code is already ready for these formats.

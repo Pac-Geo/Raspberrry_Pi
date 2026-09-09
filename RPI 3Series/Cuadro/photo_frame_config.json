@@ -9,7 +9,7 @@
   "apps_script_url": "https://script.google.com/macros/s/AKfycbzke5eN-5VNLriVYGjG8mH4-dEWb1km7iGoxhgm262S62JwzOVulGjC9ajhb3DQ8ZdRJA/exec",
   "apps_script_token": "facildeconectar",
   "download_chunk_size": 1048576,
-  "max_photo_size_mb": 100,
+  "max_photo_size_mb": 250,
   "download_retries": 3,
   "http_timeout_seconds": 30,
   "log_file": "/home/pacgeo/photo_frame/logs/photo_frame.log",
@@ -33,5 +33,8 @@
   "upload_overlay_margin_px": 30,
   "upload_overlay_opacity": 235,
   "progressive_media_scan_seconds": 1.0,
-  "photo_frame_cache_items": 6
+  "photo_frame_cache_items": 6,
+  "upload_overlay_photo_margin_fraction": 0.025,
+  "sharpen_upscaled_photos": false,
+  "accept_extended_image_formats": true
 }

@@ -500,3 +500,125 @@ Controls remain:
   Up Arrow    -> rotate photo clockwise
   Down Arrow  -> rotate photo counterclockwise
   Q / Esc     -> quit
+
+
+V5.7 QR SIZE + IMAGE-RELATIVE ROTATION
+--------------------------------------
+QR changes:
+  - QR size is back to 12%.
+  - QR is no longer anchored to the monitor.
+  - It is composited onto the displayed photo itself.
+  - It stays at the photo's bottom-right corner.
+  - When Up/Down rotates the photo, the QR rotates with that photo.
+
+This keeps the watermark visually attached to the image rather than the screen.
+All V5.6 fast-key/caching behavior remains.
+
+
+V5.8 QR MONITOR-CORNER + IMAGE-RELATIVE POSITION
+------------------------------------------------
+This combines the two QR behaviors:
+
+  - QR is anchored to an actual corner of the monitor.
+  - The chosen corner represents the photo's relative bottom-right.
+  - QR rotates with the photo.
+  - QR remains 12% of the monitor width.
+
+Corner behavior:
+  normal photo       -> monitor bottom-right
+  clockwise 90 deg   -> monitor bottom-left
+  180 deg             -> monitor top-left
+  counterclockwise 90 -> monitor top-right
+
+So the QR stays at a clean monitor corner while still behaving as though it is
+attached to the bottom-right corner of the rotated image.
+
+
+V5.9 QR SIZE 15%
+----------------
+QR placement remains monitor-corner anchored while following the photo's
+relative bottom-right as the photo rotates.
+
+QR size changed:
+  12% -> 15% of the monitor width
+
+
+V6.0 EXTENDED IMAGE FORMAT SUPPORT
+----------------------------------
+The frame now accepts a much broader set of still-image formats, including:
+
+  JPEG / JPG / JFIF
+  PNG
+  HEIC / HEIF
+  AVIF
+  WebP
+  GIF (first frame)
+  TIFF / TIF
+  BMP / DIB
+  ICO
+  PPM / PGM / PBM / PNM
+  PCX
+  TGA
+  DDS
+  EPS (when Pillow/system support is available)
+
+Google Drive sync is also more tolerant:
+  - known image MIME types are accepted
+  - image/* MIME types are accepted when the filename extension is supported
+
+QUALITY / ORIGINAL PRESERVATION
+-------------------------------
+The original photo file is preserved byte-for-byte on the USB drive.
+The program does NOT convert or recompress the original HEIC/JPEG/etc. file.
+
+For display only:
+  - EXIF orientation is applied correctly
+  - the image is decoded into RGB
+  - LANCZOS is used for FIT resizing
+  - aspect ratio is preserved
+  - no foreground cropping
+  - sharpening after enlargement is OFF by default to preserve the source look
+
+New config:
+  "max_photo_size_mb": 250
+  "sharpen_upscaled_photos": false
+  "accept_extended_image_formats": true
+
+HEIC/HEIF support is provided by pillow-heif and libheif.
+
+
+V6.1 HEIC + QR ROTATION CORRECTION
+----------------------------------
+QR:
+  - size changed to 13%
+  - QR and photo now receive the same manual rotation
+  - QR is placed at the monitor corner corresponding to the photo's relative
+    bottom-right
+  - QR is composed before the frame's portrait-display rotation, so the QR and
+    image cannot drift into different orientations
+
+HEIC/HEIF:
+  - explicit high-quality pillow-heif decoder path
+  - EXIF orientation retained
+  - originals remain untouched; decoding/resizing occurs only in memory
+  - no recompression is written to the USB original
+  - installer verifies pillow-heif after installation
+
+IMPORTANT DRIVE LIMITATION:
+  If Apps Script says it returned only 2 files, the Pi cannot discover 4 HEIC
+  files that the server did not include. See APPS_SCRIPT_IMAGE_FILTER_PATCH.txt.
+
+
+V6.2 QR ALIGNMENT FIX
+---------------------
+This release changes ONLY the QR behavior.
+
+- QR size is 12%.
+- QR is placed at the monitor-corner position corresponding to the photo's
+  relative bottom-right.
+- QR is rotated by the SAME manual rotation value as the photo.
+- QR and photo are then passed through the SAME final portrait-display rotation
+  together as one composed frame.
+
+This fixes the previous version where present_frame() received the QR arguments
+but never actually drew the overlay.

@@ -47,6 +47,7 @@
 
 import base64
 import hashlib
+import io
 import json
 import os
 import re
@@ -59,6 +60,12 @@ import requests
 import subprocess
 import threading
 from PIL import Image, ImageFilter, ImageOps
+
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+except ImportError:
+    pillow_heif = None
 
 try:
     from gpiozero import MotionSensor
@@ -86,9 +93,10 @@ DEFAULT_CONFIG = {
     ),
     'apps_script_token': 'facildeconectar',
     'download_chunk_size': 1024 * 1024,
-    'max_photo_size_mb': 100,
+    'max_photo_size_mb': 250,
     'download_retries': 3,
     'http_timeout_seconds': 30,
+    'sharpen_upscaled_photos': False,
     'log_file': '/home/pacgeo/photo_frame/logs/photo_frame.log',
     'log_max_bytes': 5 * 1024 * 1024,
 }
@@ -267,16 +275,72 @@ sync_thread = None
 sync_in_progress = False
 sync_completed_generation = 0
 
-IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.webp'}
+IMAGE_EXTENSIONS = {
+    '.jpg', '.jpeg', '.jpe', '.jfif',
+    '.png',
+    '.bmp', '.dib',
+    '.webp',
+    '.gif',
+    '.tif', '.tiff',
+    '.heic', '.heif',
+    '.avif',
+    '.ico',
+    '.ppm', '.pgm', '.pbm', '.pnm',
+    '.pcx',
+    '.tga',
+    '.dds',
+    '.eps',
+}
 VIDEO_EXTENSIONS = {'.mp4', '.m4v', '.mov', '.avi', '.mkv', '.mpeg', '.mpg', '.webm', '.mts', '.m2ts', '.3gp', '.wmv', '.mvre'}
 SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
 DRIVE_MIME_TYPES = {
-    'image/jpeg', 'image/png',
+    'image/jpeg',
+    'image/png',
+    'image/heic',
+    'image/heif',
+    'image/avif',
+    'image/webp',
+    'image/gif',
+    'image/bmp',
+    'image/x-ms-bmp',
+    'image/tiff',
+    'image/x-tiff',
+    'image/x-icon',
+    'image/vnd.microsoft.icon',
+    'image/x-portable-anymap',
+    'image/x-portable-bitmap',
+    'image/x-portable-graymap',
+    'image/x-portable-pixmap',
+    'image/x-pcx',
+    'image/x-tga',
+    'image/vnd.adobe.photoshop',
+    'application/postscript',
     'video/mp4', 'video/quicktime', 'video/x-msvideo',
     'video/x-matroska', 'video/mpeg', 'video/webm'
 }
 
 session = requests.Session()
+
+
+def is_supported_image_name(name):
+    return Path(str(name)).suffix.lower() in IMAGE_EXTENSIONS
+
+
+def is_supported_drive_media(photo):
+    mime = str(photo.get('mimeType', '')).lower()
+    name = str(photo.get('name', ''))
+
+    if mime in DRIVE_MIME_TYPES:
+        return True
+
+    # Accept any image/* type when the filename extension is one we know how
+    # to decode locally. This makes the Drive side tolerant of MIME variations.
+    if mime.startswith('image/') and is_supported_image_name(name):
+        return True
+
+    return False
+
+
 
 
 def usb_is_mounted():
@@ -388,7 +452,17 @@ def fetch_drive_photo_list():
             })
         except (KeyError, TypeError, ValueError):
             print(f'Skipping malformed Drive entry: {item}')
-    print(f'Drive photos parsed: {len(photos)}')
+    print(f'Drive media returned by Apps Script: {len(photos)}')
+    heic_count = sum(
+        1 for item in photos
+        if Path(item['name']).suffix.lower() in {'.heic', '.heif'}
+    )
+    print(f'Drive HEIC/HEIF entries returned: {heic_count}')
+    if len(photos) > 0 and heic_count == 0:
+        print(
+            'NOTE: If HEIC files exist in the Drive folder but this count is 0, '
+            'the Apps Script list endpoint is filtering them BEFORE the Pi sees them.'
+        )
     return photos
 
 
@@ -411,7 +485,7 @@ def fetch_drive_chunk(photo, offset, requested_length):
 
 
 def download_photo(photo):
-    if photo['mimeType'] not in DRIVE_MIME_TYPES:
+    if not is_supported_drive_media(photo):
         return False
     size = int(photo['size'])
     if size <= 0 or size > MAX_PHOTO_SIZE:
@@ -489,7 +563,7 @@ def sync_drive_to_usb():
     downloaded = skipped = failed = 0
     for photo in photos:
         size = int(photo['size'])
-        if size <= 0 or size > MAX_PHOTO_SIZE or photo['mimeType'] not in DRIVE_MIME_TYPES:
+        if size <= 0 or size > MAX_PHOTO_SIZE or not is_supported_drive_media(photo):
             skipped += 1
             continue
 
@@ -718,65 +792,114 @@ def play_video(path):
     return False
 
 
-def make_frame(path, screen_w, screen_h, manual_rotation=0):
-    with Image.open(path) as src:
-        image = ImageOps.exif_transpose(src).convert('RGB')
 
-        # Manual photo rotation requested from the keyboard.
-        # PIL positive angles rotate counterclockwise.
-        manual_rotation = int(manual_rotation) % 360
-        if manual_rotation:
-            image = image.rotate(manual_rotation, expand=True)
+def open_image_high_quality(path):
+    """
+    Open an image for DISPLAY without changing the original file.
 
-        background = image.copy()
-        cover_scale = max(screen_w / background.width, screen_h / background.height)
-        background = background.resize(
-            (
-                max(1, round(background.width * cover_scale)),
-                max(1, round(background.height * cover_scale)),
-            ),
-            Image.Resampling.LANCZOS,
-        )
-        left = max(0, (background.width - screen_w) // 2)
-        top = max(0, (background.height - screen_h) // 2)
-        background = background.crop((left, top, left + screen_w, top + screen_h))
-        background = background.filter(ImageFilter.GaussianBlur(radius=24))
-        black = Image.new('RGB', background.size, (0, 0, 0))
-        background = Image.blend(background, black, 0.18)
+    HEIC/HEIF/AVIF are decoded with pillow-heif when available. The returned
+    Pillow image is an in-memory working copy only; no conversion is written
+    back to USB.
+    """
+    suffix = path.suffix.lower()
 
-        # TRUE FIT: preserve the entire image and preserve aspect ratio.
-        #
-        # Small source images can look soft if enlarged too aggressively.
-        # Limit enlargement to a configurable maximum, then apply a very mild
-        # sharpening pass only when an image was actually enlarged.
-        fit_scale = min(screen_w / image.width, screen_h / image.height)
-        max_upscale = float(CONFIG.get("max_photo_upscale_factor", 2.0))
-
-        if fit_scale > 1.0:
-            final_scale = min(fit_scale, max_upscale)
-        else:
-            final_scale = fit_scale
-
-        foreground_w = max(1, round(image.width * final_scale))
-        foreground_h = max(1, round(image.height * final_scale))
-
-        foreground = image.resize(
-            (foreground_w, foreground_h),
-            Image.Resampling.LANCZOS,
-        )
-
-        # Recover a little edge definition after enlargement without creating
-        # the harsh halos that strong sharpening can cause.
-        if final_scale > 1.0:
-            foreground = foreground.filter(
-                ImageFilter.UnsharpMask(radius=1.0, percent=110, threshold=3)
+    if suffix in {'.heic', '.heif', '.avif'} and pillow_heif is not None:
+        try:
+            heif = pillow_heif.read_heif(str(path), convert_hdr_to_8bit=False)
+            image = Image.frombytes(
+                heif.mode,
+                heif.size,
+                heif.data,
+                'raw',
+                heif.mode,
+                heif.stride,
             )
+            # Carry metadata that Pillow can use for orientation/color handling.
+            if getattr(heif, 'info', None):
+                image.info.update(heif.info)
+            return image
+        except Exception as exc:
+            print(f'HEIF direct decode fallback for {path.name}: {exc}')
 
-        x = (screen_w - foreground.width) // 2
-        y = (screen_h - foreground.height) // 2
-        background.paste(foreground, (x, y))
+    # Registered Pillow opener handles JPEG/PNG/WebP/TIFF/etc., and also HEIF
+    # when pillow-heif registration succeeded. Copy detaches from file handle.
+    with Image.open(path) as src:
+        try:
+            src.seek(0)
+        except Exception:
+            pass
+        return src.copy()
 
-        return pil_to_surface(background)
+
+def make_frame(path, screen_w, screen_h, manual_rotation=0):
+    # Decode into an in-memory working image only. Original file is untouched.
+    image = open_image_high_quality(path)
+    image = ImageOps.exif_transpose(image)
+
+    if image.mode not in ('RGB', 'RGBA'):
+        image = image.convert('RGB')
+    elif image.mode == 'RGBA':
+        base = Image.new('RGB', image.size, (0, 0, 0))
+        base.paste(image, mask=image.getchannel('A'))
+        image = base
+    else:
+        image = image.convert('RGB')
+
+    # Manual photo rotation requested from the keyboard.
+    # PIL positive angles rotate counterclockwise.
+    manual_rotation = int(manual_rotation) % 360
+    if manual_rotation:
+        image = image.rotate(manual_rotation, expand=True)
+
+    background = image.copy()
+    cover_scale = max(screen_w / background.width, screen_h / background.height)
+    background = background.resize(
+        (
+            max(1, round(background.width * cover_scale)),
+            max(1, round(background.height * cover_scale)),
+        ),
+        Image.Resampling.LANCZOS,
+    )
+    left = max(0, (background.width - screen_w) // 2)
+    top = max(0, (background.height - screen_h) // 2)
+    background = background.crop((left, top, left + screen_w, top + screen_h))
+    background = background.filter(ImageFilter.GaussianBlur(radius=24))
+    black = Image.new('RGB', background.size, (0, 0, 0))
+    background = Image.blend(background, black, 0.18)
+
+    # TRUE FIT: preserve the entire image and preserve aspect ratio.
+    #
+    # Small source images can look soft if enlarged too aggressively.
+    # Limit enlargement to a configurable maximum, then apply a very mild
+    # sharpening pass only when an image was actually enlarged.
+    fit_scale = min(screen_w / image.width, screen_h / image.height)
+    max_upscale = float(CONFIG.get("max_photo_upscale_factor", 2.0))
+
+    if fit_scale > 1.0:
+        final_scale = min(fit_scale, max_upscale)
+    else:
+        final_scale = fit_scale
+
+    foreground_w = max(1, round(image.width * final_scale))
+    foreground_h = max(1, round(image.height * final_scale))
+
+    foreground = image.resize(
+        (foreground_w, foreground_h),
+        Image.Resampling.LANCZOS,
+    )
+
+    # Optional mild sharpening after enlargement. Disabled by default to
+    # preserve the source look as faithfully as possible.
+    if final_scale > 1.0 and bool(CONFIG.get("sharpen_upscaled_photos", False)):
+        foreground = foreground.filter(
+            ImageFilter.UnsharpMask(radius=0.8, percent=75, threshold=4)
+        )
+
+    x = (screen_w - foreground.width) // 2
+    y = (screen_h - foreground.height) // 2
+    background.paste(foreground, (x, y))
+
+    return pil_to_surface(background)
 
 
 def draw_message(screen, lines):
@@ -839,39 +962,41 @@ def present_frame(
     physical_h,
     rotation,
     upload_overlay=None,
+    media_rotation=0,
 ):
     """
-    Rotate the slideshow image to match the physical portrait display.
-
-    The QR overlay is drawn AFTER the display rotation, so it always remains
-    upright and anchored to the viewer's bottom-right corner.
+    Compose QR + photo first, then rotate the WHOLE completed frame to the
+    physical portrait display. This guarantees the QR and photo always share
+    the exact same final screen orientation.
     """
+    # Work on a copy so repeated redraws never permanently stamp the QR into
+    # frame_canvas.
+    composed = frame_surface.copy()
+
+    if upload_overlay is not None:
+        draw_upload_overlay(
+            composed,
+            upload_overlay,
+            composed.get_width(),
+            composed.get_height(),
+            media_rotation=media_rotation,
+        )
+
     if rotation == 90:
-        output = pygame.transform.rotate(frame_surface, -90)
+        output = pygame.transform.rotate(composed, -90)
     elif rotation == 180:
-        output = pygame.transform.rotate(frame_surface, 180)
+        output = pygame.transform.rotate(composed, 180)
     elif rotation == 270:
         # pygame positive rotation is counterclockwise.
-        output = pygame.transform.rotate(frame_surface, 90)
+        output = pygame.transform.rotate(composed, 90)
     else:
-        output = frame_surface
+        output = composed
 
     if output.get_size() != (physical_w, physical_h):
         output = pygame.transform.smoothscale(output, (physical_w, physical_h))
 
     screen.blit(output, (0, 0))
-
-    if upload_overlay is not None:
-        draw_upload_overlay(
-            screen,
-            upload_overlay,
-            physical_w,
-            physical_h,
-        )
-
     pygame.display.flip()
-
-
 
 def load_upload_overlay():
     """Load the optional QR upload overlay as a pygame surface."""
@@ -889,47 +1014,63 @@ def load_upload_overlay():
         return None
 
 
-def draw_upload_overlay(target_surface, overlay_surface, screen_w, screen_h):
+def draw_upload_overlay(
+    target_surface,
+    overlay_surface,
+    screen_w,
+    screen_h,
+    media_rotation=0,
+):
     """
-    Draw the QR upload card in the bottom-right corner.
-
-    The overlay is scaled relative to the logical portrait frame so it remains
-    readable without covering too much of the photo.
+    Draw the QR in a logical monitor corner that represents the photo's
+    relative bottom-right. The QR is rotated by the SAME manual rotation as
+    the photo, then the whole canvas receives the normal display rotation.
+    This guarantees the photo and QR always share the same orientation.
     """
     if overlay_surface is None:
         return
-
-    if not bool(CONFIG.get("upload_overlay_enabled", True)):
+    if not bool(CONFIG.get('upload_overlay_enabled', True)):
         return
 
-    width_fraction = float(CONFIG.get("upload_overlay_width_fraction", 0.24))
-    margin = int(CONFIG.get("upload_overlay_margin_px", 30))
-    opacity = int(CONFIG.get("upload_overlay_opacity", 235))
+    fraction = float(CONFIG.get('upload_overlay_width_fraction', 0.12))
+    margin = int(CONFIG.get('upload_overlay_margin_px', 30))
+    opacity = int(CONFIG.get('upload_overlay_opacity', 235))
+    mr = int(media_rotation) % 360
 
-    target_w = max(120, round(screen_w * width_fraction))
+    # Rotate first, then scale the FINAL bounding-box width to exactly the
+    # configured fraction. This keeps apparent size consistent at 0/90/180/270.
+    qr = overlay_surface
+    if mr:
+        qr = pygame.transform.rotate(qr, mr)
 
-    src_w, src_h = overlay_surface.get_size()
-    scale = target_w / src_w
+    src_w, src_h = qr.get_size()
+    target_w = max(70, round(screen_w * fraction))
+    scale = target_w / max(1, src_w)
     target_h = max(1, round(src_h * scale))
+    qr = pygame.transform.smoothscale(qr, (target_w, target_h))
+    qr.set_alpha(max(0, min(255, opacity)))
 
-    max_h = max(1, screen_h - (2 * margin))
-    if target_h > max_h:
-        scale = max_h / src_h
-        target_w = max(1, round(src_w * scale))
-        target_h = max(1, round(src_h * scale))
+    qr_w, qr_h = qr.get_size()
 
-    overlay = pygame.transform.smoothscale(
-        overlay_surface,
-        (target_w, target_h),
-    )
+    # Relative bottom-right corner of the image as the image is rotated.
+    # media_rotation uses PIL convention: 90=CCW, 270=CW.
+    if mr == 0:
+        x = screen_w - qr_w - margin
+        y = screen_h - qr_h - margin
+    elif mr == 270:  # clockwise 90
+        x = margin
+        y = screen_h - qr_h - margin
+    elif mr == 180:
+        x = margin
+        y = margin
+    elif mr == 90:  # counterclockwise 90
+        x = screen_w - qr_w - margin
+        y = margin
+    else:
+        x = screen_w - qr_w - margin
+        y = screen_h - qr_h - margin
 
-    overlay.set_alpha(max(0, min(255, opacity)))
-
-    x = screen_w - target_w - margin
-    y = screen_h - target_h - margin
-
-    target_surface.blit(overlay, (x, y))
-
+    target_surface.blit(qr, (x, y))
 
 
 # ------------------------------------------------------------
@@ -1131,7 +1272,8 @@ def main():
                         frame_canvas.fill((0, 0, 0))
                     present_frame(
                         screen, frame_canvas, physical_w, physical_h, rotation,
-                        upload_overlay=upload_overlay
+                        upload_overlay=upload_overlay,
+                        media_rotation=(media_rotation.get(current_path, 0) if current_path else 0),
                     )
                 except Exception as exc:
                     print(f"Wake redraw failed: {exc}")
@@ -1162,7 +1304,8 @@ def main():
                 frame_canvas.fill((0, 0, 0))
                 present_frame(
                     screen, frame_canvas, physical_w, physical_h, rotation,
-                    upload_overlay=upload_overlay
+                    upload_overlay=upload_overlay,
+                    media_rotation=(media_rotation.get(current_path, 0) if current_path else 0),
                 )
             except Exception as exc:
                 print(f"Black-screen blanking failed: {exc}")
@@ -1197,7 +1340,8 @@ def main():
                         frame_canvas.fill((0, 0, 0))
                     present_frame(
                         screen, frame_canvas, physical_w, physical_h, rotation,
-                        upload_overlay=upload_overlay
+                        upload_overlay=upload_overlay,
+                        media_rotation=(media_rotation.get(current_path, 0) if current_path else 0),
                     )
                 except Exception as exc:
                     print(f"Wake redraw failed: {exc}")
@@ -1478,7 +1622,8 @@ def main():
             frame_canvas.blit(current_surface, (0, 0))
             present_frame(
                 screen, frame_canvas, physical_w, physical_h, rotation,
-                upload_overlay=upload_overlay
+                upload_overlay=upload_overlay,
+                media_rotation=(media_rotation.get(current_path, 0) if current_path else 0),
             )
 
         clock.tick(60)

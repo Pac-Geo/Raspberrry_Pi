@@ -31,7 +31,7 @@ sudo systemctl daemon-reload
 echo "Installing photo-frame controls for user: $CURRENT_USER"
 
 sudo apt update
-sudo apt install -y python3-gpiozero util-linux
+sudo apt install -y python3-gpiozero util-linux python3-pip python3-pil libheif1
 
 mkdir -p "$PROJECT_DIR/logs"
 mkdir -p "$AUTOSTART_DIR"
@@ -53,11 +53,22 @@ rm -f "$PROJECT_DIR/.stop_requested"
 
 echo
 echo "Installed."
-echo "F12 now toggles:"
-echo "  running -> HARD STOP"
-echo "  stopped -> START"
-echo
-echo "Service status:"
-sudo systemctl --no-pager --full status photo-frame-f12-toggle.service || true
 
 rm -f "$PROJECT_DIR/.frame_group_pid"
+
+
+# HEIC / HEIF / AVIF decoding support.
+# Raspberry Pi OS may mark system Python as externally managed, so install
+# pillow-heif into this user's site-packages while explicitly allowing it.
+python3 -m pip install --user --break-system-packages --upgrade pillow-heif || {
+    echo "WARNING: pillow-heif install failed. HEIC/HEIF decoding will not work until installed."
+}
+
+# Confirm decoder availability immediately.
+python3 - <<'PYTEST'
+try:
+    import pillow_heif
+    print('HEIC/HEIF decoder: OK')
+except Exception as exc:
+    print('HEIC/HEIF decoder: FAILED ->', exc)
+PYTEST
